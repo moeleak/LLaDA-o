@@ -215,6 +215,33 @@ The same interface also exposes:
 
 This makes it straightforward to migrate from notebook-based experimentation to Python-based evaluation scripts.
 
+## Evaluation
+
+The repository includes text-to-image evaluation support under [`eval/`](./eval):
+
+- **GenEval**: distributed image generation plus Mask2Former/OpenCLIP scoring.
+- **DPG-Bench**: distributed image generation, 2x2 grid construction, and mPLUG VQA scoring.
+
+See [`eval/README.md`](./eval/README.md) for the full environment setup, external model downloads, and benchmark commands.
+
+In short, after installing the base environment and downloading the LLaDA-o checkpoint, install the optional benchmark dependencies and run:
+
+```bash
+export LLADAO_MODEL_PATH=/path/to/local/GSAI-ML-LLaDA-o
+
+# GenEval
+bash eval/gen/geneval/evaluation/download_models.sh \
+  ./eval/gen/geneval/evaluation/models/mask2former
+export GENEVAL_DETECTOR_MODEL_PATH=./eval/gen/geneval/evaluation/models/mask2former
+bash scripts/eval/run_geneval_dllm.sh "$LLADAO_MODEL_PATH"
+
+# DPG-Bench
+pip install -r https://raw.githubusercontent.com/TencentQQGYLab/ELLA/main/requirements-for-dpg_bench.txt
+bash scripts/eval/run_dpg_dllm.sh "$LLADAO_MODEL_PATH" /path/to/dpg_prompts.jsonl
+```
+
+All local paths can be overridden through environment variables documented in [`eval/README.md`](./eval/README.md).
+
 ## Repository Structure
 
 ```text
@@ -224,14 +251,18 @@ LLaDA-o/
 |-- multimodal_demo.ipynb
 |-- prompt.txt
 |-- data/
+|-- eval/
 |-- modeling/
+|-- scripts/
 `-- train/
 ```
 
 - [`demo_pipeline.py`](./demo_pipeline.py): high-level inference wrapper and default task configurations.
 - [`inferencer.py`](./inferencer.py): interleaved multimodal inference logic for text and images.
 - [`data/`](./data): dataset definitions, transforms, parquet/webdataset utilities, and interleaved dataset support.
+- [`eval/`](./eval): GenEval and DPG-Bench generation evaluation utilities.
 - [`modeling/`](./modeling): model definitions for LLaDA, LLaDA-o, SigLIP-based vision components, and the autoencoder.
+- [`scripts/eval/`](./scripts/eval): launcher scripts for GenEval and DPG-Bench.
 - [`train/`](./train): distributed training utilities and the main pretraining script.
 
 ## Acknowledgements
