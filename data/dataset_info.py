@@ -30,6 +30,10 @@ VLM_BEE_DIR = os.environ.get(
     "LLADAO_VLM_BEE_DIR",
     os.path.join(LOCAL_HF_DATA_ROOT, "Honey-Data-15M"),
 )
+GUI_GROUNDING_DIR = os.environ.get(
+    "LLADAO_GUI_GROUNDING_DIR",
+    os.path.join(LOCAL_HF_DATA_ROOT, "lladao_gui_120k", "parquet"),
+)
 
 DATASET_INFO = {
     't2i_wds': {
@@ -41,5 +45,12 @@ DATASET_INFO = {
         'vlm_bee': {
             'data_dir': VLM_BEE_DIR,
         }, # https://huggingface.co/datasets/Open-Bee/Honey-Data-15M
+        'gui_grounding_table1': {
+            'data_dir': GUI_GROUNDING_DIR,
+        }, # Table 1 of https://arxiv.org/abs/2603.26211; prepared by scripts/data/prepare_gui_grounding.py
+        # Backward-compatible alias for the original 20K-per-source build.
+        'gui_grounding_120k': {
+            'data_dir': GUI_GROUNDING_DIR,
+        },
     },
 }
