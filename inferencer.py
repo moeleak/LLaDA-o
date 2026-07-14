@@ -167,6 +167,8 @@ class InterleaveInferencer:
         latent = latent.reshape(1, h, w, self.model.latent_patch_size, self.model.latent_patch_size, self.model.latent_channel)
         latent = torch.einsum("nhwpqc->nchpwq", latent)
         latent = latent.reshape(1, self.model.latent_channel, h * self.model.latent_patch_size, w * self.model.latent_patch_size)
+        vae_param = next(self.vae_model.parameters())
+        latent = latent.to(device=vae_param.device, dtype=vae_param.dtype)
         image = self.vae_model.decode(latent)
         image = (image * 0.5 + 0.5).clamp(0, 1)[0].permute(1, 2, 0) * 255
         image = Image.fromarray((image).to(torch.uint8).cpu().numpy())

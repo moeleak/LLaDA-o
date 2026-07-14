@@ -705,6 +705,8 @@ class LLaDAO(PreTrainedModel):
         packed_sequence = packed_text_embedding.new_zeros((sum(packed_seqlens), self.hidden_size))
         packed_sequence[packed_text_indexes] = packed_text_embedding
 
+        vae_param = next(vae_model.parameters())
+        padded_images = padded_images.to(device=vae_param.device, dtype=vae_param.dtype)
         padded_latent = vae_model.encode(padded_images)
 
         p = self.latent_patch_size

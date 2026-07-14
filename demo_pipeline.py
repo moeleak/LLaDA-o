@@ -150,6 +150,8 @@ class LLaDAMultimodalDemo:
         vit_config.num_hidden_layers = vit_config.num_hidden_layers - 1
 
         vae_model, vae_config = load_ae(local_path=str(model_path / "ae.safetensors"))
+        vae_device = torch.device("cuda", torch.cuda.current_device())
+        vae_model = vae_model.to(device=vae_device, dtype=torch.bfloat16).eval()
 
         config = LLaDAOConfig(
             visual_gen=True,
