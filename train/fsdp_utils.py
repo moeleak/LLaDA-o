@@ -9,6 +9,10 @@ import os
 import torch
 import torch.distributed as dist
 import torch.distributed.fsdp._traversal_utils as traversal_utils
+from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
+    get_model_state_dict,
+)
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import (
     CPUOffload,
@@ -16,8 +20,6 @@ from torch.distributed.fsdp import (
     MixedPrecision,
     BackwardPrefetch,
     ShardingStrategy,
-    FullStateDictConfig,
-    StateDictType,
 )
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from safetensors.torch import load_file, save_file
@@ -238,53 +240,57 @@ class FSDPCheckpoint:
         os.makedirs(save_path, exist_ok=True)
         logger.info(f"Saving checkpoint to {save_path}.")
 
+        # Preserve the previous FULL_STATE_DICT behavior: gather unsharded CPU
+        # tensors on rank 0 and return an empty state dict on every other rank.
+        # get_model_state_dict is the replacement for the deprecated
+        # FSDP.state_dict_type context manager and works with FSDP1 and FSDP2.
+        full_state_dict_options = StateDictOptions(
+            full_state_dict=True,
+            cpu_offload=True,
+        )
+
         if ema_model is not None:
-            with FSDP.state_dict_type(
+            ema_state_dict = get_model_state_dict(
                 ema_model,
-                StateDictType.FULL_STATE_DICT,
-                FullStateDictConfig(rank0_only=True, offload_to_cpu=True),
-            ):
-                ema_state_dict = ema_model.state_dict()
-                if dist.get_rank() == 0:
-                    save_file(ema_state_dict, os.path.join(save_path, "ema.safetensors"))
+                options=full_state_dict_options,
+            )
+            if dist.get_rank() == 0:
+                save_file(ema_state_dict, os.path.join(save_path, "ema.safetensors"))
             del ema_state_dict
             torch.cuda.empty_cache()
 
-        with FSDP.state_dict_type(
+        model_state_dict = get_model_state_dict(
             model,
-            StateDictType.FULL_STATE_DICT,
-            FullStateDictConfig(rank0_only=True, offload_to_cpu=True),
-        ):
-            model_state_dict = model.state_dict()
-            if dist.get_rank() == 0:
-                save_file(model_state_dict, os.path.join(save_path, "model.safetensors"))
+            options=full_state_dict_options,
+        )
+        if dist.get_rank() == 0:
+            save_file(model_state_dict, os.path.join(save_path, "model.safetensors"))
         del model_state_dict
         torch.cuda.empty_cache()
 
-        with FSDP.state_dict_type(model, StateDictType.LOCAL_STATE_DICT):
-            if fsdp_config.sharding_strategy == "FULL_SHARD":
-                shard_index = dist.get_rank()
-                total_shards = dist.get_world_size()
-            elif fsdp_config.sharding_strategy == "HYBRID_SHARD":
-                shard_index = dist.get_rank() % fsdp_config.num_shard
-                total_shards = fsdp_config.num_shard
-            else:
-                raise NotImplementedError
+        if fsdp_config.sharding_strategy == "FULL_SHARD":
+            shard_index = dist.get_rank()
+            total_shards = dist.get_world_size()
+        elif fsdp_config.sharding_strategy == "HYBRID_SHARD":
+            shard_index = dist.get_rank() % fsdp_config.num_shard
+            total_shards = fsdp_config.num_shard
+        else:
+            raise NotImplementedError
 
-            optimizer_save_path = os.path.join(
-                save_path, f"optimizer.{shard_index:05d}-of-{total_shards:05d}.pt"
-            )
-            if fsdp_config.sharding_strategy == "FULL_SHARD":
+        optimizer_save_path = os.path.join(
+            save_path, f"optimizer.{shard_index:05d}-of-{total_shards:05d}.pt"
+        )
+        if fsdp_config.sharding_strategy == "FULL_SHARD":
+            optimizer_state_dict = optimizer.state_dict()
+            torch.save(optimizer_state_dict, optimizer_save_path)
+            del optimizer_state_dict
+        elif fsdp_config.sharding_strategy == "HYBRID_SHARD":
+            if dist.get_rank() < fsdp_config.num_shard:
                 optimizer_state_dict = optimizer.state_dict()
                 torch.save(optimizer_state_dict, optimizer_save_path)
                 del optimizer_state_dict
-            elif fsdp_config.sharding_strategy == "HYBRID_SHARD":
-                if dist.get_rank() < fsdp_config.num_shard:
-                    optimizer_state_dict = optimizer.state_dict()
-                    torch.save(optimizer_state_dict, optimizer_save_path)
-                    del optimizer_state_dict
-            else:
-                raise NotImplementedError
+        else:
+            raise NotImplementedError
 
         if dist.get_rank() == 0 and scheduler is not None:
             torch.save(scheduler.state_dict(), os.path.join(save_path, "scheduler.pt"))
