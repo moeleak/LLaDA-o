@@ -1,0 +1,33 @@
+image = "nvcr.io#nvidia/pytorch:25.01-py3"
+
+mounts = [
+    "/iopsstor",
+    "/capstor"
+]
+
+workdir = "${SCRATCH}/projects/LLaDA-o"
+writable = true
+entrypoint = true
+
+[env]
+LLADAO_REPO_ROOT = "${SCRATCH}/projects/LLaDA-o"
+LLADAO_VENV = "${SCRATCH}/venvs/lladao-ngc-25.01-v2"
+VIRTUAL_ENV = "${SCRATCH}/venvs/lladao-ngc-25.01-v2"
+PATH = "${SCRATCH}/venvs/lladao-ngc-25.01-v2/bin:${PATH}"
+PYTHONPATH = "${SCRATCH}/projects/LLaDA-o:${PYTHONPATH:-}"
+
+HF_HOME = "${SCRATCH}/huggingface"
+MODEL_PATH = "${SCRATCH}/models/GSAI-ML-LLaDA-o"
+GUI_ROOT = "${SCRATCH}/datasets/lladao_gui_120k"
+LLADAO_GUI_GROUNDING_DIR = "${SCRATCH}/datasets/lladao_gui_120k/parquet"
+RESULTS_DIR = "${SCRATCH}/runs/lladao_gui_120k"
+PIP_CACHE_DIR = "${SCRATCH}/.cache/pip"
+TORCH_HOME = "${SCRATCH}/.cache/torch"
+WANDB_DIR = "${SCRATCH}/wandb"
+
+CUDA_CACHE_DISABLE = "0"
+CUDA_CACHE_PATH = "/tmp/cuda-cache"
+TRITON_CACHE_DIR = "/tmp/triton-cache"
+
+[annotations]
+com.pyxis.entrypoint_log = "true"
