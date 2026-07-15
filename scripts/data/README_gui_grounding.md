@@ -187,8 +187,9 @@ longer non-debug allocation:
 ```bash
 TOTAL_STEPS=10001 \
 SAVE_EVERY=500 \
-EXPECTED_NUM_TOKENS=8192 \
-MAX_NUM_TOKENS=12288 \
+EXPECTED_NUM_TOKENS=6144 \
+MAX_NUM_TOKENS=8192 \
+MAX_NUM_TOKENS_PER_SAMPLE=8192 \
 bash scripts/train_gui_grounding_120k.sh
 ```
 
@@ -220,8 +221,11 @@ checkpoint loading, and each FSDP sharding stage.
 `total_samples` to calculate the actual epoch length. On Clariden, keep
 `--exclusive --mem=450G`; each rank still needs one full model plus the active
 checkpoint shard before FSDP can distribute its parameters. A four-GPU GH200
-smoke test reserved nearly all 96 GiB of HBM at the `8192/12288` token settings,
-so increase these limits only after measuring memory on the target world size.
+run exhausted the 96 GiB HBM allocator after checkpointing at the `8192/12288`
+token settings. The one-node wrapper therefore defaults to `6144/8192`, keeps
+the single-sample limit at or below the packed-batch limit, and enables
+expandable CUDA allocator segments. Increase these limits only after measuring
+memory on the target world size.
 
 For an unattended one-node job on Clariden, run the submission wrapper from a
 login node:

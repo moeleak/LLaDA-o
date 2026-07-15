@@ -27,8 +27,9 @@ export TOTAL_STEPS="${TOTAL_STEPS:-10001}"
 export SAVE_EVERY="${SAVE_EVERY:-500}"
 export LOG_EVERY="${LOG_EVERY:-10}"
 export WANDB_NAME="${WANDB_NAME:-gui-grounding-1node}"
-export EXPECTED_NUM_TOKENS="${EXPECTED_NUM_TOKENS:-8192}"
-export MAX_NUM_TOKENS="${MAX_NUM_TOKENS:-12288}"
+export EXPECTED_NUM_TOKENS="${EXPECTED_NUM_TOKENS:-6144}"
+export MAX_NUM_TOKENS="${MAX_NUM_TOKENS:-8192}"
+export MAX_NUM_TOKENS_PER_SAMPLE="${MAX_NUM_TOKENS_PER_SAMPLE:-8192}"
 export GPUS_PER_NODE
 
 [[ -f "${BATCH_SCRIPT}" ]] || {
@@ -66,7 +67,8 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
     TOTAL_STEPS "${TOTAL_STEPS}" \
     SAVE_EVERY "${SAVE_EVERY}" \
     EXPECTED_NUM_TOKENS "${EXPECTED_NUM_TOKENS}" \
-    MAX_NUM_TOKENS "${MAX_NUM_TOKENS}"
+    MAX_NUM_TOKENS "${MAX_NUM_TOKENS}" \
+    MAX_NUM_TOKENS_PER_SAMPLE "${MAX_NUM_TOKENS_PER_SAMPLE}"
   printf '\nCommand:'
   printf ' %q' "${submit_command[@]}"
   printf '\n'

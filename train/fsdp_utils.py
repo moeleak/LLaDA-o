@@ -247,6 +247,8 @@ class FSDPCheckpoint:
                 ema_state_dict = ema_model.state_dict()
                 if dist.get_rank() == 0:
                     save_file(ema_state_dict, os.path.join(save_path, "ema.safetensors"))
+            del ema_state_dict
+            torch.cuda.empty_cache()
 
         with FSDP.state_dict_type(
             model,
@@ -256,6 +258,8 @@ class FSDPCheckpoint:
             model_state_dict = model.state_dict()
             if dist.get_rank() == 0:
                 save_file(model_state_dict, os.path.join(save_path, "model.safetensors"))
+        del model_state_dict
+        torch.cuda.empty_cache()
 
         with FSDP.state_dict_type(model, StateDictType.LOCAL_STATE_DICT):
             if fsdp_config.sharding_strategy == "FULL_SHARD":
@@ -271,10 +275,14 @@ class FSDPCheckpoint:
                 save_path, f"optimizer.{shard_index:05d}-of-{total_shards:05d}.pt"
             )
             if fsdp_config.sharding_strategy == "FULL_SHARD":
-                torch.save(optimizer.state_dict(), optimizer_save_path)
+                optimizer_state_dict = optimizer.state_dict()
+                torch.save(optimizer_state_dict, optimizer_save_path)
+                del optimizer_state_dict
             elif fsdp_config.sharding_strategy == "HYBRID_SHARD":
                 if dist.get_rank() < fsdp_config.num_shard:
-                    torch.save(optimizer.state_dict(), optimizer_save_path)
+                    optimizer_state_dict = optimizer.state_dict()
+                    torch.save(optimizer_state_dict, optimizer_save_path)
+                    del optimizer_state_dict
             else:
                 raise NotImplementedError
 
@@ -285,6 +293,9 @@ class FSDPCheckpoint:
             torch.save(data_status, os.path.join(save_path, "data_status.pt"))
 
         dist.barrier()
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        logger.info(f"Finished saving checkpoint to {save_path}.")
         return
 
     @staticmethod
