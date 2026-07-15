@@ -106,12 +106,13 @@ The repository includes two launchers:
 - `scripts/slurm/train_gui_grounding_120k.sbatch` requests Slurm resources and
   starts one distributed launcher per node.
 
-The defaults perform full-model BF16 fine-tuning with FSDP `FULL_SHARD`, using
-eight GPUs per node. An 8B model plus its optimizer and EMA copy needs
-substantial memory; eight 80 GB A100/H100-class GPUs are the recommended
-starting point. Cluster partition, account, GPU type, and wall-time policies are
-site-specific, so add the corresponding `#SBATCH` directives to the `.sbatch`
-file or pass them on the `sbatch` command line.
+The defaults target one Clariden GH200 node with four GPUs and perform
+full-model BF16 fine-tuning with FSDP `FULL_SHARD`. The training and EMA models
+are constructed and sharded sequentially so each rank holds at most one full
+FP32 model in host memory during startup. The launch still requests the Clariden
+maximum usable node memory (`450G`) and exclusive access to leave room for
+checkpoint shards and Python workers. Cluster partition, account, GPU type, and
+wall-time policies remain site-specific.
 
 ### 1. Check the inputs
 
@@ -148,7 +149,8 @@ srun \
   --ntasks=1 \
   --gpus-per-node=4 \
   --cpus-per-task=32 \
-  --mem=200G \
+  --exclusive \
+  --mem=450G \
   --time=01:30:00 \
   --environment=./lladao.toml \
   --pty bash --rcfile scripts/bootstrap_lladao_env.sh -i
@@ -169,6 +171,7 @@ TOTAL_STEPS=2 \
 SAVE_EVERY=1 \
 LOG_EVERY=1 \
 WANDB_NAME=gui-grounding-smoke \
+MAX_RESTARTS=0 \
 EXPECTED_NUM_TOKENS=8192 \
 MAX_NUM_TOKENS=12288 \
 bash scripts/train_gui_grounding_120k.sh
@@ -187,12 +190,35 @@ MAX_NUM_TOKENS=36864 \
 bash scripts/train_gui_grounding_120k.sh
 ```
 
+From a second login shell, inspect the live Slurm and GPU memory usage with:
+
+```bash
+JOB_ID=2765257  # replace with the ID shown by squeue
+
+sstat -j "${JOB_ID}" --allsteps \
+  --format=JobID,AveRSS,MaxRSS,TresUsageInMax
+
+srun --overlap --jobid="${JOB_ID}" --nodes=1 --ntasks=1 \
+  nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu \
+  --format=csv
+```
+
+After a failed or completed step, `sacct -j "${JOB_ID}"` reports its
+state, exit code, requested memory, and peak resident memory:
+
+```bash
+sacct -j "${JOB_ID}" \
+  --format=JobID,State,ExitCode,ReqMem,MaxRSS,MaxVMSize
+```
+
+The training log also reports rank 0 host RSS after model construction,
+checkpoint loading, and each FSDP sharding stage.
+
 `TOTAL_STEPS=10001` is a rough four-GPU starting point when retaining the
 32K-token target. Use the logged `total_samples` to calculate the actual epoch
-length. The 200 GB host-memory request may be insufficient during initial model
-and EMA construction because every rank builds a full model before FSDP shards
-it; request more host memory if the job is killed before the first training
-step. If GPU memory is insufficient, use `EXPECTED_NUM_TOKENS=16384` and
+length. On Clariden, keep `--exclusive --mem=450G`; each rank still needs one
+full model plus the active checkpoint shard before FSDP can distribute its
+parameters. If GPU memory is insufficient, use `EXPECTED_NUM_TOKENS=16384` and
 `MAX_NUM_TOKENS=18432`, then increase `TOTAL_STEPS` based on the observed sample
 throughput.
 
@@ -219,21 +245,24 @@ sbatch \
   scripts/slurm/train_gui_grounding_120k.sbatch
 ```
 
-The `.sbatch` file defaults to `--gres=gpu:8`. On clusters that use the newer
-generic GPU option, replace that directive with `#SBATCH --gpus-per-node=8`.
+The `.sbatch` file defaults to `--gres=gpu:4`. On clusters that use the newer
+generic GPU option, replace that directive with `#SBATCH --gpus-per-node=4`.
 
 ### 3. Submit multiple nodes
 
 Command-line resource options override the defaults in the `.sbatch` file. For
-two nodes with eight GPUs each:
+two Clariden nodes with four GPUs each:
 
 ```bash
 sbatch \
   --nodes=2 \
-  --gres=gpu:8 \
-  --export=ALL,GPUS_PER_NODE=8 \
+  --gres=gpu:4 \
+  --export=ALL,GPUS_PER_NODE=4 \
   scripts/slurm/train_gui_grounding_120k.sbatch
 ```
+
+This requests eight GPUs in total. On Clariden's `debug` partition, the
+90-node-minute limit means a two-node job can request at most 45 minutes.
 
 The first allocated host is selected as `MASTER_ADDR`; a job-specific port is
 derived from `SLURM_JOB_ID`. One `atorch.distributed.run` launcher runs on each
@@ -253,7 +282,7 @@ Useful overrides include:
 
 | Variable | Default | Meaning |
 | --- | ---: | --- |
-| `TOTAL_STEPS` | `5001` | Optimizer iterations; the final default save is step 5000 |
+| `TOTAL_STEPS` | `10001` | Optimizer iterations; the final default save is step 10000 |
 | `SAVE_EVERY` | `500` | Checkpoint interval |
 | `LEARNING_RATE` | `2.5e-5` | Peak learning rate |
 | `WARMUP_STEPS` | `300` | Warm-up iterations |

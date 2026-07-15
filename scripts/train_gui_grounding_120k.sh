@@ -27,7 +27,7 @@ RESUME_FROM="${RESUME_FROM:-${MODEL_PATH}}"
 
 NNODES="${NNODES:-${SLURM_NNODES:-1}}"
 if [[ -z "${NPROC_PER_NODE:-}" ]]; then
-  gpu_spec="${GPUS_PER_NODE:-${SLURM_GPUS_ON_NODE:-8}}"
+  gpu_spec="${GPUS_PER_NODE:-${SLURM_GPUS_ON_NODE:-4}}"
   if [[ "${gpu_spec}" =~ ([0-9]+)$ ]]; then
     NPROC_PER_NODE="${BASH_REMATCH[1]}"
   else
@@ -39,13 +39,13 @@ MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 MASTER_PORT="${MASTER_PORT:-29199}"
 MAX_RESTARTS="${MAX_RESTARTS:-5}"
 
-# With roughly three GUI samples packed per rank on eight GPUs, step 5000 is
+# With roughly three GUI samples packed per rank on four GPUs, step 10000 is
 # approximately one pass over the paper's 120K allocation. The locally
 # reproducible Table 1 corpus contains 107,341 valid rows, so treat this as a
 # starting point and tune it from the logged global total_samples value.
 # The extra final iteration makes the existing zero-based training loop save a
-# checkpoint at step 5000 when SAVE_EVERY=500.
-TOTAL_STEPS="${TOTAL_STEPS:-5001}"
+# checkpoint at step 10000 when SAVE_EVERY=500.
+TOTAL_STEPS="${TOTAL_STEPS:-10001}"
 WARMUP_STEPS="${WARMUP_STEPS:-300}"
 SAVE_EVERY="${SAVE_EVERY:-500}"
 LOG_EVERY="${LOG_EVERY:-10}"

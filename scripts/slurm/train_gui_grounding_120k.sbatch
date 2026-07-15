@@ -2,13 +2,15 @@
 # Copyright 2026 LLaDA-o contributors.
 # SPDX-License-Identifier: Apache-2.0
 
-# Generic defaults. Command-line sbatch options override these directives.
-# Add your cluster's --account, --partition, and --constraint if required.
+# Clariden GH200 defaults. Command-line sbatch options override these
+# directives; adjust the resource requests when using another cluster.
 #SBATCH --job-name=lladao-gui-120k
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:8
+#SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=64
+#SBATCH --exclusive
+#SBATCH --mem=450G
 #SBATCH --time=48:00:00
 #SBATCH --output=slurm-%x-%j.out
 #SBATCH --error=slurm-%x-%j.err
@@ -28,7 +30,7 @@ cd "${REPO_ROOT}"
 export NNODES="${SLURM_NNODES}"
 
 if [[ -z "${GPUS_PER_NODE:-}" ]]; then
-  gpu_spec="${SLURM_GPUS_ON_NODE:-8}"
+  gpu_spec="${SLURM_GPUS_ON_NODE:-4}"
   if [[ "${gpu_spec}" =~ ([0-9]+)$ ]]; then
     export GPUS_PER_NODE="${BASH_REMATCH[1]}"
   else

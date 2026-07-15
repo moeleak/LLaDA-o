@@ -182,6 +182,47 @@ class FSDPCheckpoint:
             logger.info(f"{state_name} load summary: loaded all {len(loaded_keys)} tensors.")
 
     @staticmethod
+    def try_load_model_ckpt(
+        resume_from,
+        logger,
+        target_model,
+        checkpoint_stem,
+        state_name,
+        fallback_stem=None,
+    ):
+        if resume_from is None or not os.path.exists(resume_from):
+            logger.info("Training from scratch.")
+            return target_model
+
+        logger.info(f"Loading checkpoint from {resume_from}.")
+        artifact_path = FSDPCheckpoint._find_safetensors_artifact(
+            resume_from, checkpoint_stem
+        )
+        if artifact_path is None and fallback_stem is not None:
+            artifact_path = FSDPCheckpoint._find_safetensors_artifact(
+                resume_from, fallback_stem
+            )
+            if artifact_path is not None:
+                logger.info(
+                    f"Could not find {checkpoint_stem} weights; "
+                    f"initializing {state_name} from {fallback_stem} weights."
+                )
+
+        if artifact_path is None:
+            expected_stems = [checkpoint_stem]
+            if fallback_stem is not None and fallback_stem != checkpoint_stem:
+                expected_stems.append(fallback_stem)
+            expected = " or ".join(
+                f"{stem}.safetensors[.index.json]" for stem in expected_stems
+            )
+            raise FileNotFoundError(f"Could not find {expected} under {resume_from}")
+
+        FSDPCheckpoint._load_model_from_safetensors_artifact(
+            target_model, artifact_path, logger, state_name=state_name
+        )
+        return target_model
+
+    @staticmethod
     def fsdp_save_ckpt(
         ckpt_dir, 
         train_steps, 
@@ -248,29 +289,24 @@ class FSDPCheckpoint:
 
     @staticmethod
     def try_load_ckpt(resume_from, logger, model, ema_model=None, resume_from_ema=False):
-        if resume_from is not None and os.path.exists(resume_from):
-            logger.info(f"Loading checkpoint from {resume_from}.")
-            model_stem = "ema" if resume_from_ema else "model"
-            model_artifact_path = FSDPCheckpoint._find_safetensors_artifact(resume_from, model_stem)
-            if model_artifact_path is None:
-                raise FileNotFoundError(
-                    f"Could not find {model_stem}.safetensors or "
-                    f"{model_stem}.safetensors.index.json under {resume_from}"
-                )
-            FSDPCheckpoint._load_model_from_safetensors_artifact(
-                model, model_artifact_path, logger, state_name="model"
-            )
+        model_stem = "ema" if resume_from_ema else "model"
+        model = FSDPCheckpoint.try_load_model_ckpt(
+            resume_from,
+            logger,
+            model,
+            checkpoint_stem=model_stem,
+            state_name="model",
+        )
 
-            if ema_model is not None:
-                ema_artifact_path = FSDPCheckpoint._find_safetensors_artifact(resume_from, "ema")
-                if ema_artifact_path is None:
-                    logger.info(f"Replicating ema model from {model_artifact_path}.")
-                    ema_artifact_path = model_artifact_path
-                FSDPCheckpoint._load_model_from_safetensors_artifact(
-                    ema_model, ema_artifact_path, logger, state_name="ema_model"
-                )
-        else:
-            logger.info(f"Training from scratch.")
+        if ema_model is not None:
+            ema_model = FSDPCheckpoint.try_load_model_ckpt(
+                resume_from,
+                logger,
+                ema_model,
+                checkpoint_stem="ema",
+                state_name="ema_model",
+                fallback_stem=model_stem,
+            )
         return model, ema_model
 
     @staticmethod

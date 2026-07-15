@@ -430,7 +430,22 @@ def main():
         wandb.config.update(data_args)
     else:
         logger = create_logger(None, dist.get_rank())
-    dist.barrier()
+
+    def log_host_memory(stage):
+        try:
+            with open("/proc/self/status", "r", encoding="utf-8") as status_file:
+                for line in status_file:
+                    if line.startswith("VmRSS:"):
+                        rss_gib = int(line.split()[1]) / 1024**2
+                        logger.info(
+                            f"Host RSS after {stage}: {rss_gib:.2f} GiB "
+                            f"(rank {dist.get_rank()})."
+                        )
+                        break
+        except (OSError, ValueError):
+            pass
+
+    dist.barrier(device_ids=[device])
     logger.info(f'Training arguments {training_args}')
     logger.info(f'Model arguments {model_args}')
     logger.info(f'Data arguments {data_args}')
@@ -460,7 +475,7 @@ def main():
     seed = training_args.global_seed * dist.get_world_size() + dist.get_rank()
     set_seed(seed)
 
-    # Setup model:
+    # Setup model configuration:
     if training_args.finetune_from_hf:
         llm_config = LLaDAConfig.from_json_file(os.path.join(model_args.model_path, "llm_config.json"))
     else:
@@ -469,24 +484,13 @@ def main():
     llm_config.qk_norm = model_args.llm_qk_norm
     llm_config.tie_word_embeddings = model_args.tie_word_embeddings
     llm_config.freeze_und = training_args.freeze_und
-    if training_args.finetune_from_hf:
-        language_model = LLaDAModelLM(llm_config)
-    else:
-        language_model = LLaDAModelLM.from_pretrained(model_args.llm_path, config=llm_config)
-    if training_args.copy_init_moe:
-        language_model.init_moe()
-
-    if training_args.visual_und:  
+    if training_args.visual_und:
         if training_args.finetune_from_hf:
             vit_config = SiglipVisionConfig.from_json_file(os.path.join(model_args.model_path, "vit_config.json"))
         else:
             vit_config = SiglipVisionConfig.from_pretrained(model_args.vit_path)
         vit_config.num_hidden_layers = vit_config.num_hidden_layers + 1 + model_args.vit_select_layer
         vit_config.rope = model_args.vit_rope
-        if training_args.finetune_from_hf:
-            vit_model = SiglipVisionModel(vit_config)
-        else:
-            vit_model = SiglipVisionModel.from_pretrained(model_args.vit_path, config=vit_config)
 
     if training_args.visual_gen:
         vae_model, vae_config = load_ae(
@@ -500,77 +504,96 @@ def main():
     if training_args.visual_gen_reg == True:
         training_args.visual_gen_repa = True # enable repa if reg is true
 
-    if training_args.visual_gen_repa:
-        repa_model = DINOv3ViTModel.from_pretrained(model_args.dino_path)
-        repa_model.eval() # set to eval mode
-
-    config = LLaDAOConfig(
-        visual_gen=training_args.visual_gen,
-        visual_und=training_args.visual_und,
-        visual_gen_repa=training_args.visual_gen_repa,
-        visual_gen_reg=training_args.visual_gen_reg,
-        repa_output_depth=training_args.repa_output_depth,
-        llm_config=llm_config, 
-        vit_config=vit_config if training_args.visual_und else None,
-        vae_config=vae_config if training_args.visual_gen else None,
-        latent_patch_size=model_args.latent_patch_size,
-        max_latent_size=model_args.max_latent_size,
-        vit_max_num_patch_per_side=model_args.vit_max_num_patch_per_side,
-        connector_act=model_args.connector_act,
-        interpolate_pos=model_args.interpolate_pos,
-        timestep_shift=training_args.timestep_shift,
-    )
-    model = LLaDAO(
-        language_model, 
-        vit_model if training_args.visual_und else None, 
-        repa_model if training_args.visual_gen_repa else None,
-        config
-    )
-
-    if training_args.visual_und:
-        model.vit_model.vision_model.embeddings.convert_conv2d_to_linear(vit_config)
-
-    # Setup tokenizer for model:
+    # Setup tokenizer before constructing the training and EMA model instances.
     tokenizer = AutoTokenizer.from_pretrained(model_args.model_path if training_args.finetune_from_hf else model_args.llm_path)
     tokenizer, new_token_ids, num_new_tokens = add_special_tokens(tokenizer)
 
-    if num_new_tokens > 0:
-        old_size = model.language_model.get_input_embeddings().num_embeddings
-        new_size = len(tokenizer)
-
-        if new_size > old_size:
-            # Expansion: safe
-            model.language_model.resize_token_embeddings(new_size)
-            model.config.llm_config.vocab_size = new_size
-            model.language_model.config.vocab_size = new_size
-            print(f"Expanding vocabulary: {old_size} -> {new_size}")
-        else:
-            # Do not shrink: only initialize rows corresponding to newly added tokens (they are < old_size at this point)
-            with torch.no_grad():
-                emb = model.language_model.get_input_embeddings()
-                std = emb.weight.std().item()
-                for tid in new_token_ids.values():
-                    if tid < old_size:
-                        emb.weight[tid].normal_(0.0, std)
-            print("Randomly initialize embeddings for new token IDs")
-
-    # maybe freeze something:
     if training_args.freeze_vae and training_args.visual_gen:
         for param in vae_model.parameters():
             param.requires_grad = False
-    if training_args.freeze_llm:
-        model.language_model.eval()
-        for param in model.language_model.parameters():
-            param.requires_grad = False
-    if training_args.freeze_vit and training_args.visual_und:
-        model.vit_model.eval()
-        for param in model.vit_model.parameters():
-            param.requires_grad = False
-    if training_args.visual_gen_repa:
-        model.repa_model.eval()
-        for param in model.repa_model.parameters():
-            param.requires_grad = False 
-            # for repa model, we need to freeze all parameters
+
+    def build_model_instance():
+        local_llm_config = deepcopy(llm_config)
+        if training_args.finetune_from_hf:
+            language_model = LLaDAModelLM(local_llm_config)
+        else:
+            language_model = LLaDAModelLM.from_pretrained(
+                model_args.llm_path, config=local_llm_config
+            )
+        if training_args.copy_init_moe:
+            language_model.init_moe()
+
+        local_vit_config = None
+        vit_model = None
+        if training_args.visual_und:
+            local_vit_config = deepcopy(vit_config)
+            if training_args.finetune_from_hf:
+                vit_model = SiglipVisionModel(local_vit_config)
+            else:
+                vit_model = SiglipVisionModel.from_pretrained(
+                    model_args.vit_path, config=local_vit_config
+                )
+
+        repa_model = None
+        if training_args.visual_gen_repa:
+            repa_model = DINOv3ViTModel.from_pretrained(model_args.dino_path)
+            repa_model.eval()
+
+        config = LLaDAOConfig(
+            visual_gen=training_args.visual_gen,
+            visual_und=training_args.visual_und,
+            visual_gen_repa=training_args.visual_gen_repa,
+            visual_gen_reg=training_args.visual_gen_reg,
+            repa_output_depth=training_args.repa_output_depth,
+            llm_config=local_llm_config,
+            vit_config=local_vit_config,
+            vae_config=deepcopy(vae_config) if training_args.visual_gen else None,
+            latent_patch_size=model_args.latent_patch_size,
+            max_latent_size=model_args.max_latent_size,
+            vit_max_num_patch_per_side=model_args.vit_max_num_patch_per_side,
+            connector_act=model_args.connector_act,
+            interpolate_pos=model_args.interpolate_pos,
+            timestep_shift=training_args.timestep_shift,
+        )
+        model = LLaDAO(language_model, vit_model, repa_model, config)
+
+        if training_args.visual_und:
+            model.vit_model.vision_model.embeddings.convert_conv2d_to_linear(
+                local_vit_config
+            )
+
+        if num_new_tokens > 0:
+            old_size = model.language_model.get_input_embeddings().num_embeddings
+            new_size = len(tokenizer)
+
+            if new_size > old_size:
+                model.language_model.resize_token_embeddings(new_size)
+                model.config.llm_config.vocab_size = new_size
+                model.language_model.config.vocab_size = new_size
+                logger.info(f"Expanding vocabulary: {old_size} -> {new_size}")
+            else:
+                with torch.no_grad():
+                    emb = model.language_model.get_input_embeddings()
+                    std = emb.weight.std().item()
+                    for tid in new_token_ids.values():
+                        if tid < old_size:
+                            emb.weight[tid].normal_(0.0, std)
+                logger.info("Randomly initialized embeddings for new token IDs.")
+
+        if training_args.freeze_llm:
+            model.language_model.eval()
+            for param in model.language_model.parameters():
+                param.requires_grad = False
+        if training_args.freeze_vit and training_args.visual_und:
+            model.vit_model.eval()
+            for param in model.vit_model.parameters():
+                param.requires_grad = False
+        if training_args.visual_gen_repa:
+            model.repa_model.eval()
+            for param in model.repa_model.parameters():
+                param.requires_grad = False
+
+        return model
 
     # Setup FSDP and load pretrained model:
     fsdp_config = FSDPConfig(
@@ -580,12 +603,45 @@ def main():
         num_replicate=training_args.num_replicate,
         num_shard=training_args.num_shard,
     )
-    ema_model = deepcopy(model)
-    model, ema_model = FSDPCheckpoint.try_load_ckpt(
-        resume_from, logger, model, ema_model, resume_from_ema=finetune_from_ema
+    # Construct and shard the training model before constructing EMA. Keeping
+    # both full FP32 instances alive on every rank can exceed a GH200 node's
+    # host-memory limit before FSDP has a chance to shard either model.
+    model_init_rng_state = torch.get_rng_state()
+    model = build_model_instance()
+    log_host_memory("constructing the training model")
+    model_stem = "ema" if finetune_from_ema else "model"
+    model = FSDPCheckpoint.try_load_model_ckpt(
+        resume_from,
+        logger,
+        model,
+        checkpoint_stem=model_stem,
+        state_name="model",
     )
-    ema_model = fsdp_ema_setup(ema_model, fsdp_config)
+    log_host_memory("loading the training checkpoint")
     fsdp_model = fsdp_wrapper(model, fsdp_config)
+    del model
+    log_host_memory("sharding the training model")
+
+    # Recreate the same initial weights for keys intentionally absent from the
+    # checkpoint, without perturbing the RNG state used by the training loop.
+    rng_state_before_ema_init = torch.get_rng_state()
+    torch.set_rng_state(model_init_rng_state)
+    try:
+        ema_model = build_model_instance()
+    finally:
+        torch.set_rng_state(rng_state_before_ema_init)
+    log_host_memory("constructing the EMA model")
+    ema_model = FSDPCheckpoint.try_load_model_ckpt(
+        resume_from,
+        logger,
+        ema_model,
+        checkpoint_stem="ema",
+        fallback_stem=model_stem,
+        state_name="ema_model",
+    )
+    log_host_memory("loading the EMA checkpoint")
+    ema_model = fsdp_ema_setup(ema_model, fsdp_config)
+    log_host_memory("sharding the EMA model")
     apply_activation_checkpointing(
         fsdp_model, 
         checkpoint_wrapper_fn=functools.partial(
@@ -596,7 +652,7 @@ def main():
 
     if dist.get_rank() == 0:
         print(fsdp_model)
-        for name, param in model.named_parameters():
+        for name, param in fsdp_model.named_parameters():
             print(name, param.requires_grad)
 
     # Setup optimizer and scheduler
