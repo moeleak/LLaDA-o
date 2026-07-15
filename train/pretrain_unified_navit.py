@@ -767,7 +767,7 @@ def main():
 
         # Log loss values:
         if curr_step % training_args.log_every == 0:
-            total_samples = torch.tensor(len(data['sample_lens']), device=device)
+            total_samples = torch.tensor(len(data_indexes), device=device)
             dist.all_reduce(total_samples, op=dist.ReduceOp.SUM)
 
             # Measure training speed:
