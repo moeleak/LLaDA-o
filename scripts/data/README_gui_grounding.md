@@ -223,7 +223,7 @@ processes roughly twice as many samples per optimizer step, so use the logged
 `--exclusive --mem=450G`; each rank still needs one full model plus the active
 checkpoint shard before FSDP can distribute its parameters. A four-GPU GH200
 run exhausted the 96 GiB HBM allocator after checkpointing at the `8192/12288`
-token settings. The one-node wrapper therefore defaults to `6144/8192`, keeps
+token settings. The eight-GPU wrapper therefore defaults to `6144/8192`, keeps
 the single-sample limit at or below the packed-batch limit, and enables
 expandable CUDA allocator segments. Increase these limits only after measuring
 memory on the target world size.
@@ -251,6 +251,28 @@ The wrapper passes `lladao.toml` to the batch script's internal `srun`, which
 sources the bootstrap inside the container before training. Model, data,
 results, and Python environment paths come from the EDF. Set `DRY_RUN=1` to
 print the resolved environment and `sbatch` command without submitting.
+
+To queue multiple 12-hour allocations sequentially, set `CHAIN_JOBS`. Every
+job after the first receives an `afterany` dependency on its predecessor and
+uses the same results directory, so auto-resume loads the newest checkpoint:
+
+```bash
+CHAIN_JOBS=2 \
+bash scripts/slurm/gui-120k-grounding-finetune.sh
+```
+
+To attach continuation jobs to an allocation that is already running, set its
+job ID as `AFTER_JOB_ID`. For example, this queues two additional allocations:
+
+```bash
+AFTER_JOB_ID=2765445 \
+CHAIN_JOBS=2 \
+bash scripts/slurm/gui-120k-grounding-finetune.sh
+```
+
+Use `afterany` rather than `afterok` because reaching the partition wall-time
+ends the predecessor in the `TIMEOUT` state. Up to `SAVE_EVERY - 1` steps can
+be replayed from the most recent completed checkpoint.
 
 ### 3. Override the node count
 

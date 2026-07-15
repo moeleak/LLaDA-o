@@ -21,6 +21,9 @@ GPUS_PER_NODE="${GPUS_PER_NODE:-4}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-32}"
 MEMORY="${MEMORY:-450G}"
 WALLTIME="${WALLTIME:-12:00:00}"
+JOB_NAME="${JOB_NAME:-gui-grounding}"
+CHAIN_JOBS="${CHAIN_JOBS:-1}"
+AFTER_JOB_ID="${AFTER_JOB_ID:-}"
 
 export REPO_ROOT
 export ENVIRONMENT_FILE
@@ -43,6 +46,14 @@ export GPUS_PER_NODE
   echo "error: GPUS_PER_NODE must be a positive integer (got ${GPUS_PER_NODE})" >&2
   exit 1
 }
+[[ "${CHAIN_JOBS}" =~ ^[1-9][0-9]*$ ]] || {
+  echo "error: CHAIN_JOBS must be a positive integer (got ${CHAIN_JOBS})" >&2
+  exit 1
+}
+if [[ -n "${AFTER_JOB_ID}" && ! "${AFTER_JOB_ID}" =~ ^[0-9]+(_[0-9]+)?$ ]]; then
+  echo "error: AFTER_JOB_ID must be a Slurm job ID (got ${AFTER_JOB_ID})" >&2
+  exit 1
+fi
 
 [[ -f "${BATCH_SCRIPT}" ]] || {
   echo "error: batch script does not exist: ${BATCH_SCRIPT}" >&2
@@ -55,22 +66,30 @@ export GPUS_PER_NODE
 
 cd "${REPO_ROOT}"
 
-submit_command=(
-  sbatch
-  --parsable
-  -A "${ACCOUNT}"
-  -p "${PARTITION}"
-  --nodes="${NNODES}"
-  --ntasks-per-node=1
-  --gres="gpu:${GPUS_PER_NODE}"
-  --cpus-per-task="${CPUS_PER_TASK}"
-  --exclusive
-  --mem="${MEMORY}"
-  --time="${WALLTIME}"
-  "$@"
-  --export=ALL
-  "${BATCH_SCRIPT}"
-)
+extra_sbatch_args=("$@")
+
+build_submit_command() {
+  local dependency_job_id="$1"
+
+  submit_command=(
+    sbatch
+    --parsable
+    -A "${ACCOUNT}"
+    -p "${PARTITION}"
+    --job-name="${JOB_NAME}"
+    --nodes="${NNODES}"
+    --ntasks-per-node=1
+    --gres="gpu:${GPUS_PER_NODE}"
+    --cpus-per-task="${CPUS_PER_TASK}"
+    --exclusive
+    --mem="${MEMORY}"
+    --time="${WALLTIME}"
+  )
+  if [[ -n "${dependency_job_id}" ]]; then
+    submit_command+=(--dependency="afterany:${dependency_job_id}")
+  fi
+  submit_command+=("${extra_sbatch_args[@]}" --export=ALL "${BATCH_SCRIPT}")
+}
 
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
   printf 'Environment:'
@@ -83,18 +102,37 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
     EXPECTED_NUM_TOKENS "${EXPECTED_NUM_TOKENS}" \
     MAX_NUM_TOKENS "${MAX_NUM_TOKENS}" \
     MAX_NUM_TOKENS_PER_SAMPLE "${MAX_NUM_TOKENS_PER_SAMPLE}"
-  printf '\nCommand:'
-  printf ' %q' "${submit_command[@]}"
-  printf '\n'
+  printf ' CHAIN_JOBS=%q AFTER_JOB_ID=%q\n' "${CHAIN_JOBS}" "${AFTER_JOB_ID}"
+
+  dependency_job_id="${AFTER_JOB_ID}"
+  for ((chain_index = 1; chain_index <= CHAIN_JOBS; chain_index++)); do
+    build_submit_command "${dependency_job_id}"
+    printf 'Command %d:' "${chain_index}"
+    printf ' %q' "${submit_command[@]}"
+    printf '\n'
+    dependency_job_id="<job-id-from-command-${chain_index}>"
+  done
   exit 0
 fi
 
-job_spec="$("${submit_command[@]}")"
-job_id="${job_spec%%;*}"
-log_path="${REPO_ROOT}/slurm-lladao-gui-120k-${job_id}.out"
+submitted_job_ids=()
+dependency_job_id="${AFTER_JOB_ID}"
+for ((chain_index = 1; chain_index <= CHAIN_JOBS; chain_index++)); do
+  build_submit_command "${dependency_job_id}"
+  job_spec="$("${submit_command[@]}")"
+  job_id="${job_spec%%;*}"
+  submitted_job_ids+=("${job_id}")
+  log_path="${REPO_ROOT}/slurm-${JOB_NAME}-${job_id}.out"
 
-printf 'Submitted job %s\n' "${job_id}"
+  printf 'Submitted job %s' "${job_id}"
+  if [[ -n "${dependency_job_id}" ]]; then
+    printf ' after job %s' "${dependency_job_id}"
+  fi
+  printf '\nLog: %s\n' "${log_path}"
+  dependency_job_id="${job_id}"
+done
+
 printf 'Results: %s\n' "${RESULTS_DIR}"
-printf 'Log: %s\n' "${log_path}"
-printf 'Monitor: squeue -j %q\n' "${job_id}"
-printf 'Follow: tail -F %q\n' "${log_path}"
+job_list="${submitted_job_ids[*]}"
+job_list="${job_list// /,}"
+printf 'Monitor: squeue -j %q\n' "${job_list}"
