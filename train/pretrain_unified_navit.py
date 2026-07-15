@@ -319,7 +319,7 @@ class TrainingArguments:
         default=0.9999,
         metadata={"help": "Decay rate for the exponential moving average of model weights."}
     )
-    max_grad_norm: int = field(
+    max_grad_norm: float = field(
         default=1.0,
         metadata={"help": "Gradient clipping threshold (L2 norm)."}
     )
