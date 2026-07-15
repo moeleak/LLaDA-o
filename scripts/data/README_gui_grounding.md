@@ -100,11 +100,13 @@ disabled and multimodal masked-prediction SFT enabled:
 
 ## Fine-tune with Slurm
 
-The repository includes two launchers:
+The repository includes three launchers:
 
 - `scripts/train_gui_grounding_120k.sh` contains the model and data arguments;
 - `scripts/slurm/train_gui_grounding_120k.sbatch` requests Slurm resources and
-  starts one distributed launcher per node.
+  starts one distributed launcher per node;
+- `scripts/slurm/gui-120k-grounding-finetune.sh` submits the standard one-node
+  Clariden production job from a login node.
 
 The defaults target one Clariden GH200 node with four GPUs and perform
 full-model BF16 fine-tuning with FSDP `FULL_SHARD`. The training and EMA models
@@ -185,8 +187,8 @@ longer non-debug allocation:
 ```bash
 TOTAL_STEPS=10001 \
 SAVE_EVERY=500 \
-EXPECTED_NUM_TOKENS=32768 \
-MAX_NUM_TOKENS=36864 \
+EXPECTED_NUM_TOKENS=8192 \
+MAX_NUM_TOKENS=12288 \
 bash scripts/train_gui_grounding_120k.sh
 ```
 
@@ -214,39 +216,35 @@ sacct -j "${JOB_ID}" \
 The training log also reports rank 0 host RSS after model construction,
 checkpoint loading, and each FSDP sharding stage.
 
-`TOTAL_STEPS=10001` is a rough four-GPU starting point when retaining the
-32K-token target. Use the logged `total_samples` to calculate the actual epoch
-length. On Clariden, keep `--exclusive --mem=450G`; each rank still needs one
-full model plus the active checkpoint shard before FSDP can distribute its
-parameters. If GPU memory is insufficient, use `EXPECTED_NUM_TOKENS=16384` and
-`MAX_NUM_TOKENS=18432`, then increase `TOTAL_STEPS` based on the observed sample
-throughput.
+`TOTAL_STEPS=10001` is a rough four-GPU starting point. Use the logged
+`total_samples` to calculate the actual epoch length. On Clariden, keep
+`--exclusive --mem=450G`; each rank still needs one full model plus the active
+checkpoint shard before FSDP can distribute its parameters. A four-GPU GH200
+smoke test reserved nearly all 96 GiB of HBM at the `8192/12288` token settings,
+so increase these limits only after measuring memory on the target world size.
 
-For unattended jobs, use the provided batch script instead. It passes
-`lladao.toml` to its internal `srun`, then sources the bootstrap inside the
-container before training. Model, data, results, and Python environment paths
-come from the EDF:
+For an unattended one-node job on Clariden, run the submission wrapper from a
+login node:
 
 ```bash
-sbatch \
-  --account=a0201 \
-  --partition=PARTITION \
-  scripts/slurm/train_gui_grounding_120k.sbatch
+bash scripts/slurm/gui-120k-grounding-finetune.sh
 ```
 
-If the cluster requires an account, partition, or GPU constraint, provide them
-without editing the launcher:
+It submits to account `a0201` and the `normal` partition for 12 hours, requests
+one node with four GPUs and 450 GB of host memory, and prints the job ID and log
+path. Settings can be overridden without editing the wrapper:
 
 ```bash
-sbatch \
-  --account=my-account \
-  --partition=gpu \
-  --constraint=a100-80gb \
-  scripts/slurm/train_gui_grounding_120k.sbatch
+TOTAL_STEPS=20001 \
+SAVE_EVERY=1000 \
+WANDB_NAME=gui-grounding-long \
+bash scripts/slurm/gui-120k-grounding-finetune.sh
 ```
 
-The `.sbatch` file defaults to `--gres=gpu:4`. On clusters that use the newer
-generic GPU option, replace that directive with `#SBATCH --gpus-per-node=4`.
+The wrapper passes `lladao.toml` to the batch script's internal `srun`, which
+sources the bootstrap inside the container before training. Model, data,
+results, and Python environment paths come from the EDF. Set `DRY_RUN=1` to
+print the resolved environment and `sbatch` command without submitting.
 
 ### 3. Submit multiple nodes
 

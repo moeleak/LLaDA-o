@@ -17,8 +17,10 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}"
+# Slurm executes a spool copy of this script, so BASH_SOURCE points under
+# /var/spool instead of the repository. Submit from the repository root or set
+# REPO_ROOT explicitly when submitting from another directory.
+REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR}}"
 ENVIRONMENT_FILE="${ENVIRONMENT_FILE:-${REPO_ROOT}/lladao.toml}"
 
 cd "${REPO_ROOT}"
