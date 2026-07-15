@@ -5,7 +5,7 @@
 # Clariden GH200 defaults. Command-line sbatch options override these
 # directives; adjust the resource requests when using another cluster.
 #SBATCH --job-name=lladao-gui-120k
-#SBATCH --nodes=1
+#SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=64

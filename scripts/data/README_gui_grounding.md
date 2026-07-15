@@ -139,7 +139,7 @@ python scripts/data/prepare_gui_grounding.py validate \
   --deep
 ```
 
-### 2. Submit one node
+### 2. Run a one-node smoke test
 
 If you normally request an interactive Pyxis shell, allocate it as usual:
 
@@ -217,7 +217,8 @@ sacct -j "${JOB_ID}" \
 The training log also reports rank 0 host RSS after model construction,
 checkpoint loading, and each FSDP sharding stage.
 
-`TOTAL_STEPS=10001` is a rough four-GPU starting point. Use the logged
+`TOTAL_STEPS=10001` is a rough four-GPU starting point. An eight-GPU run
+processes roughly twice as many samples per optimizer step, so use the logged
 `total_samples` to calculate the actual epoch length. On Clariden, keep
 `--exclusive --mem=450G`; each rank still needs one full model plus the active
 checkpoint shard before FSDP can distribute its parameters. A four-GPU GH200
@@ -227,16 +228,17 @@ the single-sample limit at or below the packed-batch limit, and enables
 expandable CUDA allocator segments. Increase these limits only after measuring
 memory on the target world size.
 
-For an unattended one-node job on Clariden, run the submission wrapper from a
-login node:
+For an unattended eight-GPU job on Clariden, run the submission wrapper from a
+login node. It uses two four-GPU GH200 nodes because each node exposes four
+GPUs:
 
 ```bash
 bash scripts/slurm/gui-120k-grounding-finetune.sh
 ```
 
 It submits to account `a0201` and the `normal` partition for 12 hours, requests
-one node with four GPUs and 450 GB of host memory, and prints the job ID and log
-path. Settings can be overridden without editing the wrapper:
+two nodes with four GPUs and 450 GB of host memory per node, and prints the job
+ID and log path. Settings can be overridden without editing the wrapper:
 
 ```bash
 TOTAL_STEPS=20001 \
@@ -250,10 +252,10 @@ sources the bootstrap inside the container before training. Model, data,
 results, and Python environment paths come from the EDF. Set `DRY_RUN=1` to
 print the resolved environment and `sbatch` command without submitting.
 
-### 3. Submit multiple nodes
+### 3. Override the node count
 
-Command-line resource options override the defaults in the `.sbatch` file. For
-two Clariden nodes with four GPUs each:
+Both the wrapper and the `.sbatch` file default to two Clariden nodes with four
+GPUs each. To submit the batch script directly with the same eight-GPU layout:
 
 ```bash
 sbatch \
@@ -263,8 +265,8 @@ sbatch \
   scripts/slurm/train_gui_grounding_120k.sbatch
 ```
 
-This requests eight GPUs in total. On Clariden's `debug` partition, the
-90-node-minute limit means a two-node job can request at most 45 minutes.
+This requests eight GPUs in total. Use the default `normal` partition for this
+run; the `debug` partition is limited to a four-GPU allocation.
 
 The first allocated host is selected as `MASTER_ADDR`; a job-specific port is
 derived from `SLURM_JOB_ID`. One `atorch.distributed.run` launcher runs on each
