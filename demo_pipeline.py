@@ -104,6 +104,11 @@ def _build_device_map(model: LLaDAO, max_mem_per_gpu: str) -> Dict[str, Union[in
         "vit_pos_embed",
     ]
 
+    available_modules = set(dict(model.named_modules()))
+    same_device_modules = [
+        module_name for module_name in same_device_modules
+        if module_name in available_modules
+    ]
     first_device = device_map.get(same_device_modules[0], "cuda:0")
     for module_name in same_device_modules:
         device_map[module_name] = first_device
@@ -134,11 +139,32 @@ class LLaDAMultimodalDemo:
         model_path: Union[str, os.PathLike[str]],
         max_mem_per_gpu: str = "40GiB",
         offload_dir: Union[str, os.PathLike[str]] = "/tmp/offload",
+        checkpoint_path: Optional[Union[str, os.PathLike[str]]] = None,
+        enable_visual_generation: bool = True,
     ) -> "LLaDAMultimodalDemo":
         model_path = Path(model_path).expanduser()
-        checkpoint_path = model_path / "ema.safetensors.index.json"
+        if checkpoint_path is None:
+            checkpoint_candidates = (
+                model_path / "ema.safetensors.index.json",
+                model_path / "ema.safetensors",
+            )
+            checkpoint_path = next(
+                (path for path in checkpoint_candidates if path.exists()),
+                checkpoint_candidates[0],
+            )
+        else:
+            checkpoint_path = Path(checkpoint_path).expanduser()
+            if checkpoint_path.is_dir():
+                checkpoint_candidates = (
+                    checkpoint_path / "ema.safetensors.index.json",
+                    checkpoint_path / "ema.safetensors",
+                )
+                checkpoint_path = next(
+                    (path for path in checkpoint_candidates if path.exists()),
+                    checkpoint_candidates[0],
+                )
         if not checkpoint_path.exists():
-            raise FileNotFoundError(f"Sharded checkpoint index not found: {checkpoint_path}")
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
         llm_config = LLaDAConfig.from_json_file(str(model_path / "llm_config.json"))
         llm_config.qk_norm = True
@@ -149,12 +175,15 @@ class LLaDAMultimodalDemo:
         vit_config.rope = False
         vit_config.num_hidden_layers = vit_config.num_hidden_layers - 1
 
-        vae_model, vae_config = load_ae(local_path=str(model_path / "ae.safetensors"))
-        vae_device = torch.device("cuda", torch.cuda.current_device())
-        vae_model = vae_model.to(device=vae_device, dtype=torch.bfloat16).eval()
+        vae_model = None
+        vae_config = None
+        if enable_visual_generation:
+            vae_model, vae_config = load_ae(local_path=str(model_path / "ae.safetensors"))
+            vae_device = torch.device("cuda", torch.cuda.current_device())
+            vae_model = vae_model.to(device=vae_device, dtype=torch.bfloat16).eval()
 
         config = LLaDAOConfig(
-            visual_gen=True,
+            visual_gen=enable_visual_generation,
             visual_und=True,
             llm_config=llm_config,
             vit_config=vit_config,
@@ -222,13 +251,14 @@ class LLaDAMultimodalDemo:
             mask_id = 126336
 
         start_time = time.time()
-        raw_text, valid_tokens, total_tokens = self.model.chat_block(
+        raw_text, valid_tokens, total_tokens, generation_stats = self.model.chat_block(
             tokenizer=self.tokenizer,
             new_token_ids=copy.deepcopy(self.new_token_ids),
             image_transform=self.understanding_transform,
             images=[image],
             prompt=prompt,
             mask_id=mask_id,
+            return_generation_stats=True,
             **run_kwargs,
         )
         elapsed_seconds = time.time() - start_time
@@ -239,6 +269,8 @@ class LLaDAMultimodalDemo:
             "valid_tokens": valid_tokens,
             "total_tokens": total_tokens,
             "elapsed_seconds": elapsed_seconds,
+            "convergence_steps": generation_stats["convergence_steps"],
+            "generation_stats": generation_stats,
         }
 
     def text_to_image(
@@ -248,6 +280,8 @@ class LLaDAMultimodalDemo:
         image_shapes: Optional[Tuple[int, int]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        if not self.model.config.visual_gen:
+            raise RuntimeError("Visual generation is disabled for this checkpoint.")
         if seed is not None:
             set_seed(seed)
 
@@ -264,6 +298,8 @@ class LLaDAMultimodalDemo:
         seed: Optional[int] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        if not self.model.config.visual_gen:
+            raise RuntimeError("Visual generation is disabled for this checkpoint.")
         if seed is not None:
             set_seed(seed)
 

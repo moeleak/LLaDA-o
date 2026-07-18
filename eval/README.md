@@ -5,6 +5,11 @@ This directory contains image-generation evaluation scripts for LLaDA-o:
 - `gen/geneval/`: GenEval prompts and Mask2Former/OpenCLIP scoring code.
 - `gen/dpg_bench/`: DPG-Bench question CSV, grid builder, and mPLUG-based scorer.
 - `gen/gen_images_mp_dllm.py`: distributed LLaDA-o text-to-image generation used by both benchmarks.
+- `gui_grounding/`: paper-aligned Mind2Web, ScreenSpot-Web, and VisualWebArena single-step grounding evaluation.
+
+See [`gui_grounding/README.md`](gui_grounding/README.md) for the GUI-grounding
+dataset manifest, Clariden Slurm workflow, metrics, and known paper
+reproducibility boundary.
 
 All commands below assume they are run from the repository root.
 

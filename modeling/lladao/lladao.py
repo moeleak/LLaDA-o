@@ -1219,6 +1219,7 @@ class LLaDAO(PreTrainedModel):
         remasking: str = 'low_confidence',
         mask_id: int = 126336,
         confidence_threshold: float = None,  # New parameter: threshold-based confidence sampling
+        generation_stats: Optional[dict] = None,
     ):
         """
         Generate text from fully cached context
@@ -1260,6 +1261,7 @@ class LLaDAO(PreTrainedModel):
             block_start = num_block * block_length
             block_end = (num_block + 1) * block_length
             block_mask_index = (x[block_start:block_end] == mask_id).unsqueeze(0)
+            iterations_used = 0
             
             # Determine sampling strategy based on whether to use threshold method
             if confidence_threshold is None:
@@ -1267,6 +1269,7 @@ class LLaDAO(PreTrainedModel):
                 num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps_per_block)
                 
                 for i in range(steps_per_block):
+                    iterations_used += 1
                     # mask_index marks which positions are still mask
                     mask_index = (x == mask_id) & (~prompt_mask)
                     
@@ -1386,6 +1389,7 @@ class LLaDAO(PreTrainedModel):
                     block_mask_count = (x[block_start:block_end] == mask_id).sum().item()
                     if block_mask_count == 0:
                         break  # Current block fully sampled
+                    iterations_used += 1
                     
                     # mask_index marks which positions are still mask
                     mask_index = (x == mask_id) & (~prompt_mask)
@@ -1505,6 +1509,20 @@ class LLaDAO(PreTrainedModel):
                         transfer_index[best_idx] = True
                     
                     x[transfer_index] = x0[transfer_index]
+
+            if generation_stats is not None:
+                generation_stats.setdefault('blocks', []).append({
+                    'strategy': (
+                        'fixed_steps'
+                        if confidence_threshold is None
+                        else 'confidence_threshold'
+                    ),
+                    'requested_steps': steps_per_block,
+                    'iterations': iterations_used,
+                    'remaining_masks': int(
+                        (x[block_start:block_end] == mask_id).sum().item()
+                    ),
+                })
         
         return x.unsqueeze(0)  # Add batch dimension
     
@@ -2192,6 +2210,7 @@ class LLaDAO(PreTrainedModel):
         remasking: str = 'low_confidence',
         mask_id: int = None,
         confidence_threshold: float = None,  # New parameter: threshold-based confidence sampling, None means use step-based sampling
+        return_generation_stats: bool = False,
     ):
         """
         Block-based iterative generation, stops automatically when EOS is encountered.
@@ -2271,6 +2290,7 @@ class LLaDAO(PreTrainedModel):
         generated_tokens = []  # Store all generated tokens
         valid_generated = 0
         total_generated = 0
+        generation_stats = {'blocks': []}
         current_rope_pos = new_rope[0]
         is_first_block = True
         
@@ -2314,6 +2334,7 @@ class LLaDAO(PreTrainedModel):
                     remasking=remasking,
                     mask_id=mask_id,
                     confidence_threshold=confidence_threshold,
+                    generation_stats=generation_stats,
                 )
             
             # block_output shape: [1, block_length]
@@ -2367,4 +2388,10 @@ class LLaDAO(PreTrainedModel):
         else:
             output = ""
         
+        generation_stats['convergence_steps'] = sum(
+            block['iterations'] for block in generation_stats['blocks']
+        )
+        generation_stats['num_response_blocks'] = len(generation_stats['blocks'])
+        if return_generation_stats:
+            return output, valid_generated, total_generated, generation_stats
         return output, valid_generated, total_generated
