@@ -146,6 +146,27 @@ alongside macro F1 over all three fixed labels because ScreenSpot is click-only
 and the paper's “macro F1 over three classes” description is otherwise
 inconsistent with its near-100 ScreenSpot F1 values.
 
+## Summarize a Table 3 checkpoint sweep
+
+Use the sweep summarizer to audit complete checkpoints under one fixed decoding
+configuration. It reports the combined Mind2Web result, all three official test
+splits, ScreenSpot diagnostics, the paper gap, and—when supplied—the same
+predictions rescored against the original DOM target boxes:
+
+```bash
+python -m eval.gui_grounding.summarize_table3_sweep \
+  --results-root "$SCRATCH/runs/lladao_gui_benchmark/table3-m2w-only" \
+  --dom-benchmark-root "$SCRATCH/datasets/lladao_gui_benchmarks" \
+  --steps-per-epoch 475.1 \
+  --require-steps 250,500,750,1000
+```
+
+The command writes `table3_sweep.json` and `table3_sweep.csv` beneath the
+results root. Once the run finishes, pass `--primary-step 4750`; intermediate
+checkpoints are explicitly labeled as training diagnostics, not candidates to
+select using test-set performance. The paper reports 83.31% SSR and 99% action
+F1 for its highlighted Mind2Web-only, cropped, OCR-target, 10-epoch row.
+
 ## Paper reference values
 
 For the paper's LLaDA-V 8B linear-masking model trained on its 120K mixture,
