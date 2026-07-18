@@ -2,12 +2,13 @@
 # Copyright 2026 LLaDA-o contributors.
 # SPDX-License-Identifier: Apache-2.0
 
-# Submit the paper-style Mind2Web-only ablation corresponding to Table 3 of
-# arXiv:2603.26211.  The paper publishes ten epochs and linear masking, but not
-# its optimizer, learning rate, batch size, prompt template, or OCR code.  The
-# defaults below retain this repository's optimizer recipe and save densely
-# around the estimated ten-epoch point so the logged global sample count can
-# select the closest checkpoint after training.
+# Submit the highlighted Mind2Web-only ablation corresponding to Table 3 of
+# arXiv:2603.26211: 7,341 unique target-preserving crops, OCR-linked target
+# annotations, ten epochs, and linear masking.  The paper does not publish its
+# optimizer, learning rate, batch size, prompt template, crop seed, or OCR
+# matcher.  The defaults below retain this repository's optimizer recipe and
+# save densely around the measured ten-epoch point so held-out evaluation can
+# select the best checkpoint without using the test score for training.
 
 set -euo pipefail
 
@@ -16,16 +17,17 @@ REPO_ROOT="${REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}"
 
 : "${SCRATCH:?SCRATCH must be set by the Clariden login environment}"
 
-export TRAIN_DATA_DIR="${TRAIN_DATA_DIR:-${SCRATCH}/datasets/lladao_gui_mind2web_target/parquet/mind2web}"
-export TRAIN_RESULTS_DIR="${TRAIN_RESULTS_DIR:-${SCRATCH}/runs/lladao_gui_mind2web_10ep}"
+export TRAIN_DATA_DIR="${TRAIN_DATA_DIR:-${SCRATCH}/datasets/lladao_gui_mind2web_target_ocr/parquet/mind2web}"
+export TRAIN_RESULTS_DIR="${TRAIN_RESULTS_DIR:-${SCRATCH}/runs/lladao_gui_mind2web_table3_ocr_10ep}"
 export RESULTS_DIR="${TRAIN_RESULTS_DIR}"
-export JOB_NAME="${JOB_NAME:-gui-m2w-table3}"
-export WANDB_NAME="${WANDB_NAME:-mind2web-target-grounding-10ep}"
+export RESUME_FROM="${RESUME_FROM:-${SCRATCH}/models/GSAI-ML-LLaDA-o}"
+export JOB_NAME="${JOB_NAME:-gui-m2w-t3-ocr}"
+export WANDB_NAME="${WANDB_NAME:-mind2web-table3-ocr-10ep}"
 
-# The prior eight-GPU run packed about 16.97 samples per optimizer step.
-# 7,341 usable rows * 10 / 16.97 = 4,326 estimated steps.  Save every 250
-# steps and continue through 4,750 so checkpoints bracket the true ten-epoch
-# point even if Mind2Web's packing density differs from the mixed corpus.
+# The measured eight-GPU Mind2Web-only run consumed about 16 samples per
+# optimizer step.  7,341 rows * 10 / 16 = 4,588 estimated steps.  Saving every
+# 250 steps and continuing through 4,750 brackets ten epochs despite small
+# packing-density changes.
 export TOTAL_STEPS="${TOTAL_STEPS:-4751}"
 export SAVE_EVERY="${SAVE_EVERY:-250}"
 export LOG_EVERY="${LOG_EVERY:-10}"
@@ -41,11 +43,17 @@ export GPUS_PER_NODE="${GPUS_PER_NODE:-4}"
 export WALLTIME="${WALLTIME:-12:00:00}"
 export CHAIN_JOBS="${CHAIN_JOBS:-2}"
 
-for required in "${TRAIN_DATA_DIR}" "${REPO_ROOT}/scripts/slurm/gui-120k-grounding-finetune.sh"; do
+for required in \
+  "${TRAIN_DATA_DIR}" \
+  "${REPO_ROOT}/scripts/slurm/gui-120k-grounding-finetune.sh"; do
   [[ -e "${required}" ]] || {
     echo "error: required input does not exist: ${required}" >&2
     exit 1
   }
 done
+if [[ ! -f "${RESUME_FROM}/ema.safetensors" && ! -f "${RESUME_FROM}/ema.safetensors.index.json" ]]; then
+  echo "error: base checkpoint is missing below ${RESUME_FROM}" >&2
+  exit 1
+fi
 
 exec bash "${REPO_ROOT}/scripts/slurm/gui-120k-grounding-finetune.sh" "$@"

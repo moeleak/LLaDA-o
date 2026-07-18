@@ -120,6 +120,17 @@ ${SCRATCH}/datasets/lladao_gui_benchmarks_ocr/
 ${SCRATCH}/datasets/lladao_gui_120k_target_ocr/parquet/
 ```
 
+Build the distinct 7,341-row OCR corpus used by the highlighted Table 3
+ablation with explicit paths so it cannot be confused with the 20K allocation
+inside the 120K mixture:
+
+```bash
+INPUT_ROOT="${SCRATCH}/datasets/lladao_gui_mind2web_target/parquet" \
+WORK_DIR="${SCRATCH}/datasets/lladao_gui_mind2web_target_ocr_work" \
+OUTPUT_ROOT="${SCRATCH}/datasets/lladao_gui_mind2web_target_ocr/parquet" \
+sbatch scripts/slurm/ocr_realign_gui_grounding_training.sbatch
+```
+
 The training rewrite changes only accepted Mind2Web coordinate labels. Images,
 prompts, action types, and typed values are preserved; the unchanged 100K rows
 are hard-linked rather than duplicated. OCR dependencies live in a separate
@@ -158,6 +169,14 @@ The repository includes three launchers:
 After constructing the OCR-aligned corpus, use
 `scripts/slurm/gui-120k-ocr-target-finetune.sh` for a separate dense-checkpoint
 adaptation run. It never overwrites the DOM-target run.
+
+For the paper's highlighted Mind2Web-only Table 3 setting, run
+`scripts/slurm/gui-mind2web-table3-finetune.sh` after constructing the separate
+7,341-row OCR corpus above. The launcher starts from the released LLaDA-o base
+checkpoint, trains with linear masking for approximately ten corpus passes,
+and saves every 250 optimizer steps around the measured ten-epoch point. This
+is intentionally separate from continuing a mixed-corpus checkpoint: the two
+experiments answer different questions and must not share an output directory.
 
 If held-out Mind2Web remains exposure-limited in the mixed run, use
 `scripts/slurm/gui-mind2web-ocr-target-finetune.sh` to finish from a validated
