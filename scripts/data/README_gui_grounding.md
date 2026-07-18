@@ -5,32 +5,32 @@ This pipeline prepares the six source/domain buckets in Table 1 of
 
 | Domain | Source | Paper Table 1 | Prepared grounding rows |
 | --- | --- | ---: | ---: |
-| Web | Mind2Web | 20,000 | 7,341 |
+| Web | Mind2Web | 20,000 | 20,000 (7,341 usable targets with crop variants) |
 | Web | WebLINX | 20,000 | 20,000 |
 | Web | OS-Atlas | 20,000 | 20,000 |
 | Mobile | OS-Atlas | 20,000 | 20,000 |
 | Mobile | RICO Widget Caption | 20,000 | 20,000 |
 | Desktop | OS-Atlas | 20,000 | 20,000 |
-| | **Total** | **120,000** | **107,341** |
+| | **Total** | **120,000** | **120,000** |
 
 ## Mind2Web count
 
 The published Multimodal-Mind2Web train split contains **7,775 raw rows**.
-All 7,775 are scanned exactly once and **no duplicate samples or synthetic crop
-variants are added**. Of those rows, 7,341 have a valid target bounding box
-that intersects the corresponding screenshot and are included in the
-fine-tuning Parquet files. The remaining 434 cannot provide valid coordinate
-supervision in the published data:
+All 7,775 are scanned. Of those rows, 7,341 have a valid target bounding box
+that intersects the corresponding screenshot. The remaining 434 cannot
+provide valid coordinate supervision in the published data:
 
 - 413 have no positive candidate bounding box;
 - 12 have a zero-width or zero-height target box;
 - 9 have a target box entirely outside the supplied screenshot.
 
 These rows are excluded instead of assigning fabricated coordinates. Their IDs
-and rejection reasons are recorded in
-`parquet/mind2web/rejections.json`. Thus, "7,775 Mind2Web rows" refers to the
-complete upstream train split, while 7,341 is the usable coordinate-grounding
-count consumed by LLaDA-o.
+and rejection reasons are recorded in `parquet/mind2web/rejections.json`.
+To match the paper's 20K allocation, the 7,341 usable targets are repeated as
+evenly as possible with seeded random target-preserving crops. Every variant
+keeps the original action ID and records its crop index and coordinates; it is
+an augmentation, not a claim that upstream contains 20K distinct actions. Use
+`--mind2web-count 7341` for the paper's Table 3 7K-only ablation.
 
 The paper does not release sample IDs, the random crop seed/parameters, or its
 OCR-to-target realignment implementation. The generated corpus is therefore a
@@ -38,6 +38,12 @@ deterministic approximation, not a byte-identical reproduction. It uses only
 published training data, pins every repository revision, keeps full images for
 all sources except target-preserving Mind2Web crops, normalizes boxes to
 `[0,1000]`, and records provenance in every row plus `manifest.json`.
+
+Mind2Web defaults to the target-explicit single-step protocol derived from the
+public `target_action_reprs` field, for example `Click on Track & Field.`. The
+legacy high-level task/history prompt can be rebuilt explicitly with
+`--mind2web-prompt-protocol task_history`, but it measures planning in addition
+to grounding and is not used for paper-comparable scores.
 
 WebLINX has 13,515 train actions that can be mapped to a target element box; it
 keeps all of them and adds prompt variants with longer action histories until
@@ -79,6 +85,16 @@ existing source directory unless `--force` is supplied. Downloads resume via
 the Hugging Face local-directory cache. WebLINX screenshots use the Git-LFS
 batch protocol to avoid one Hub API request per image; completed files are
 reused and every new image is checked against its LFS SHA-256.
+
+On Clariden, rebuild only the corrected Mind2Web allocation while hard-linking
+the unchanged 100K rows from an existing prepared corpus:
+
+```bash
+sbatch scripts/slurm/prepare_gui_grounding_table1_aligned.sbatch
+```
+
+The default destination is `$SCRATCH/datasets/lladao_gui_120k_target` and is
+deep-validated after the 20K Mind2Web bucket is written.
 
 ## Use with LLaDA-o
 
@@ -323,14 +339,15 @@ The paper specifies the 120K data mixture but does not publish a complete set
 of optimizer, batch-size, or 120K-run epoch hyperparameters. Consequently, the
 defaults above are reproducible engineering starting points based on this
 repository's existing training settings, not a claim of exact paper
-reproduction. The prepared open-data approximation contains 107,341 usable
-rows rather than 120,000.
+reproduction. The prepared corpus contains 120,000 training records; its
+Mind2Web bucket contains audited crop augmentations of 7,341 usable public
+actions because the paper does not publish an additional 12,659 action IDs.
 
 Because batching is token-based, steps do not map to epochs exactly. Watch the
 logged global `total_samples`, average it over several steps, and estimate:
 
 ```text
-steps_per_epoch = 107341 / average_global_total_samples_per_step
+steps_per_epoch = 120000 / average_global_total_samples_per_step
 ```
 
 If CUDA runs out of memory, lower both `EXPECTED_NUM_TOKENS` and

@@ -39,10 +39,10 @@ MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 MASTER_PORT="${MASTER_PORT:-29199}"
 MAX_RESTARTS="${MAX_RESTARTS:-5}"
 
-# With roughly three GUI samples packed per rank on four GPUs, step 10000 is
-# approximately one pass over the paper's 120K allocation. The locally
-# reproducible Table 1 corpus contains 107,341 valid rows, so treat this as a
-# starting point and tune it from the logged global total_samples value.
+# With token-based packing, optimizer steps do not map to epochs exactly.  At
+# the measured eight-GPU packing rate of roughly 16.97 global samples/step,
+# 7,071 steps are one pass over the prepared 120K allocation. Treat the default
+# as a starting point and verify exposure from the logged total_samples value.
 # The extra final iteration makes the existing zero-based training loop save a
 # checkpoint at step 10000 when SAVE_EVERY=500.
 TOTAL_STEPS="${TOTAL_STEPS:-10001}"

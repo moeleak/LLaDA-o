@@ -70,4 +70,14 @@ srun \
   --ntasks-per-node=1 \
   --gpus-per-task="${GPUS_PER_NODE}" \
   --kill-on-bad-exit=1 \
-  bash -c 'source "${LLADAO_REPO_ROOT}/scripts/bootstrap_lladao_env.sh" && exec bash "${LLADAO_REPO_ROOT}/scripts/train_gui_grounding_120k.sh"'
+  bash -c '
+    set -euo pipefail
+    source "${LLADAO_REPO_ROOT}/scripts/bootstrap_lladao_env.sh"
+    if [[ -n "${TRAIN_DATA_DIR:-}" ]]; then
+      export LLADAO_GUI_GROUNDING_DIR="${TRAIN_DATA_DIR}"
+    fi
+    if [[ -n "${TRAIN_RESULTS_DIR:-}" ]]; then
+      export RESULTS_DIR="${TRAIN_RESULTS_DIR}"
+    fi
+    exec bash "${LLADAO_REPO_ROOT}/scripts/train_gui_grounding_120k.sh"
+  '

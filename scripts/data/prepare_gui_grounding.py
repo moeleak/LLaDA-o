@@ -4,8 +4,10 @@
 The paper publishes aggregate source counts, but not sample IDs, crop seeds, or
 the OCR realignment implementation.  This script therefore builds a pinned,
 deterministic approximation and records every decision in the output manifest.
-Mind2Web is kept at its published 7,775-row train split instead of being
-synthetically expanded to the paper's 20K scaling bucket.
+Mind2Web's usable public rows are repeated with deterministic random,
+target-preserving crops to reach the paper's 20K allocation; every crop variant
+is explicitly identified in provenance rather than presented as a new source
+example.
 
 The resulting Parquet files are directly consumable by LLaDA-o's
 ``vlm_parquet`` dataset loader.  Each row contains one image and one
@@ -35,6 +37,23 @@ from typing import Any, Sequence
 import pyarrow as pa
 import pyarrow.parquet as pq
 from PIL import Image, ImageFile
+
+try:
+    from .gui_grounding_protocol import (
+        MIND2WEB_PROMPT_PROTOCOLS,
+        TARGET_GROUNDING,
+        mind2web_crop_plan,
+        mind2web_prompt,
+        parse_target_action,
+    )
+except ImportError:  # Direct execution: python scripts/data/<this file>.py
+    from gui_grounding_protocol import (
+        MIND2WEB_PROMPT_PROTOCOLS,
+        TARGET_GROUNDING,
+        mind2web_crop_plan,
+        mind2web_prompt,
+        parse_target_action,
+    )
 
 
 Image.MAX_IMAGE_PIXELS = 250_000_000
@@ -292,44 +311,60 @@ def choose_mind2web_candidate(raw_candidates: Sequence[str]) -> dict[str, Any]:
     return next((x for x in candidates if x.get("is_original_target")), candidates[0])
 
 
-def mind2web_metadata(row: dict[str, Any]) -> dict[str, Any]:
+def mind2web_metadata(
+    row: dict[str, Any], prompt_protocol: str = TARGET_GROUNDING
+) -> dict[str, Any]:
     operation = row.get("operation", {})
     operation = json.loads(operation) if isinstance(operation, str) else operation
     candidate = choose_mind2web_candidate(row.get("pos_candidates") or [])
-    raw_rect = candidate["_attrs"]["bounding_box_rect"]
+    attributes = candidate["_attrs"]
+    raw_rect = attributes["bounding_box_rect"]
     x, y, width, height = [float(v) for v in str(raw_rect).split(",")]
     if width <= 0 or height <= 0:
         raise ValueError("Invalid Mind2Web target rectangle")
 
-    original_op = str(operation.get("original_op") or operation.get("op") or "CLICK").upper()
-    if original_op == "HOVER":
-        action = "hover"
-    elif original_op in {"TYPE", "SELECT"}:
-        action = "type_in"
-    else:
-        action = "lclick"
-
-    action_reprs = list(row.get("action_reprs") or [])
-    try:
-        target_index = int(row.get("target_action_index", 0))
-    except (TypeError, ValueError):
-        target_index = max(0, len(action_reprs) - 1)
-    previous = [compact_text(item, 300) for item in action_reprs[:target_index]][-8:]
-    task = compact_text(row.get("confirmed_task"), 1_000)
-    prompt = "Complete the following web task by predicting the next GUI action.\n"
-    prompt += f"Task: {task}"
-    if previous:
-        prompt += "\nPrevious actions:\n" + "\n".join(f"- {item}" for item in previous)
+    fallback_description = next(
+        (
+            attributes.get(key)
+            for key in (
+                "aria-label",
+                "aria_label",
+                "text",
+                "title",
+                "placeholder",
+                "alt",
+                "value",
+            )
+            if attributes.get(key)
+        ),
+        candidate.get("tag") or "",
+    )
+    target = parse_target_action(
+        row.get("target_action_reprs"),
+        operation,
+        fallback_description=fallback_description,
+    )
+    prompt = mind2web_prompt(
+        prompt_protocol,
+        target,
+        confirmed_task=row.get("confirmed_task"),
+        action_reprs=row.get("action_reprs") or [],
+        target_action_index=row.get("target_action_index", 0),
+    )
 
     return {
         "action_uid": str(row["action_uid"]),
         "annotation_id": str(row.get("annotation_id") or ""),
         "website": str(row.get("website") or ""),
         "bbox": [x, y, x + width, y + height],
-        "action": action,
-        "value": str(operation.get("value") or ""),
+        "action": target.action,
+        "operation": target.operation,
+        "value": target.value,
         "prompt": prompt,
-        "target_action_repr": str(row.get("target_action_reprs") or ""),
+        "prompt_protocol": prompt_protocol,
+        "target_description": target.description,
+        "target_role": target.role,
+        "target_action_repr": target.raw_target_action_repr,
     }
 
 
@@ -341,6 +376,7 @@ def target_center_crop(
     seed: int,
     sample_id: str,
     variant: int,
+    randomize: bool,
 ) -> tuple[Image.Image, list[float], list[int]]:
     image = image.convert("RGB")
     image_width, image_height = image.size
@@ -364,7 +400,7 @@ def target_center_crop(
     if x_low > x_high or y_low > y_high:
         raise ValueError("Unable to construct target-preserving crop")
 
-    if variant == 0:
+    if not randomize:
         crop_x = round((x_low + x_high) / 2)
         crop_y = round((y_low + y_high) / 2)
     else:
@@ -391,7 +427,12 @@ def build_mind2web(
     seed: int,
     crop_size: int,
     shard_size: int,
+    prompt_protocol: str = TARGET_GROUNDING,
+    target_count: int = DEFAULT_COUNT,
+    random_crop: bool = True,
 ) -> dict[str, Any]:
+    if target_count <= 0:
+        raise ValueError("Mind2Web target_count must be positive")
     files = parquet_files(raw_dir / "data", "train-*.parquet")
     refs: list[RowRef] = []
     metadata_columns = [
@@ -421,7 +462,7 @@ def build_mind2web(
             for row_index, row in enumerate(rows):
                 raw_rows += 1
                 try:
-                    meta = mind2web_metadata(row)
+                    meta = mind2web_metadata(row, prompt_protocol)
                     with Image.open(io.BytesIO(screenshots[row_index]["bytes"])) as image:
                         image_width, image_height = image.size
                     x1, y1, x2, y2 = meta["bbox"]
@@ -458,9 +499,18 @@ def build_mind2web(
     if not refs:
         raise RuntimeError("Mind2Web yielded no eligible training rows")
 
-    # Use each valid published training row exactly once.  In particular, do
-    # not create extra crop variants to inflate Mind2Web to 20K.
-    selected = [(ref, 0) for ref in refs]
+    # The paper allocates 20K rows to Mind2Web although the public train split
+    # has only 7,341 usable coordinate targets.  Retain every eligible target,
+    # then repeat them as evenly as possible with deterministic random crop
+    # variants.  When a smaller count is requested, select targets by a stable
+    # seeded ordering rather than depending on Parquet file order.
+    refs_by_id = {ref.sample_id: ref for ref in refs}
+    selected = [
+        (refs_by_id[sample_id], variant)
+        for sample_id, variant in mind2web_crop_plan(
+            list(refs_by_id), target_count, seed
+        )
+    ]
 
     variants_by_location: dict[tuple[str, int, int], list[tuple[RowRef, int]]] = defaultdict(list)
     for ref, variant in selected:
@@ -490,6 +540,7 @@ def build_mind2web(
                         seed=seed,
                         sample_id=ref.sample_id,
                         variant=variant,
+                        randomize=random_crop,
                     )
                     bbox_1000 = normalize_bbox(shifted_bbox, *cropped.size)
                     answer = action_string(meta["action"], bbox_1000, meta["value"])
@@ -499,11 +550,20 @@ def build_mind2web(
                         "original_id": ref.sample_id,
                         "annotation_id": meta["annotation_id"],
                         "website": meta["website"],
+                        "source_operation": meta["operation"],
+                        "target_action_repr": meta["target_action_repr"],
+                        "target_description": meta["target_description"],
+                        "target_role": meta["target_role"],
+                        "prompt_protocol": meta["prompt_protocol"],
                         "source_bbox_xyxy": meta["bbox"],
                         "crop_xyxy": crop_box,
                         "bbox_1000": bbox_1000,
                         "crop_variant": variant,
-                        "preprocessing": "deterministic target-preserving crop; source DOM bbox",
+                        "preprocessing": (
+                            "deterministic seeded random target-preserving crop; source DOM bbox"
+                            if random_crop
+                            else "deterministic centered target-preserving crop; source DOM bbox"
+                        ),
                         "paper_approximation": "Paper did not publish crop IDs/seed or OCR realignment code",
                     }
                     writer.write(
@@ -518,8 +578,8 @@ def build_mind2web(
                         )
                     )
     written = writer.close()
-    if written != len(refs):
-        raise RuntimeError(f"Mind2Web wrote {written:,}, expected {len(refs):,}")
+    if written != len(selected):
+        raise RuntimeError(f"Mind2Web wrote {written:,}, expected {len(selected):,}")
     rejection_path = output_dir / "rejections.json"
     rejection_path.write_text(
         json.dumps(rejections, indent=2, ensure_ascii=False) + "\n"
@@ -528,7 +588,10 @@ def build_mind2web(
         "rows": written,
         "published_train_rows": raw_rows,
         "eligible_source_rows": len(refs),
-        "synthetic_variants": 0,
+        "target_rows": target_count,
+        "repeated_crop_variants": max(0, target_count - len(refs)),
+        "random_target_preserving_crop": random_crop,
+        "prompt_protocol": prompt_protocol,
         "skipped_invalid_or_missing_bbox": skipped,
         "skipped_target_not_visible": skipped_not_visible,
         "rejection_audit": str(rejection_path.relative_to(output_dir.parent)),
@@ -1588,6 +1651,13 @@ def build_selected(args: argparse.Namespace) -> None:
             seed=args.seed,
             crop_size=args.mind2web_crop_size,
             shard_size=args.shard_size,
+            prompt_protocol=args.mind2web_prompt_protocol,
+            target_count=(
+                args.mind2web_count
+                if args.mind2web_count is not None
+                else args.count
+            ),
+            random_crop=args.mind2web_crop_mode == "random",
         ),
         "weblinx": lambda path: build_weblinx(
             raw / "weblinx_meta",
@@ -1638,10 +1708,18 @@ def build_selected(args: argparse.Namespace) -> None:
         "paper": "https://arxiv.org/abs/2603.26211",
         "seed": args.seed,
         "target_rows_per_scalable_source": args.count,
-        "mind2web_policy": (
-            "scan all 7,775 published train rows once; do not upsample; "
-            "exclude rows without valid visible target boxes"
+        "mind2web_target_rows": (
+            args.mind2web_count
+            if args.mind2web_count is not None
+            else args.count
         ),
+        "mind2web_policy": (
+            "scan all 7,775 published train rows; exclude rows without valid "
+            "visible target boxes; repeat eligible targets with audited crop "
+            "variants to reach the requested allocation"
+        ),
+        "mind2web_prompt_protocol": args.mind2web_prompt_protocol,
+        "mind2web_crop_mode": args.mind2web_crop_mode,
         "exact_reproduction": False,
         "reason": "Paper does not publish sample IDs, crop seed/parameters, or OCR realignment code",
         "sources": previous_sources,
@@ -1708,10 +1786,30 @@ def parse_args() -> argparse.Namespace:
         "--count",
         type=int,
         default=DEFAULT_COUNT,
-        help="Rows for each scalable source; Mind2Web always scans its full 7,775-row train split",
+        help="Rows for each paper source bucket (default: 20,000)",
     )
     build.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    build.add_argument(
+        "--mind2web-count",
+        type=int,
+        help="Mind2Web output rows; defaults to --count (the paper allocation is 20,000)",
+    )
     build.add_argument("--mind2web-crop-size", type=int, default=1280)
+    build.add_argument(
+        "--mind2web-crop-mode",
+        choices=("random", "center"),
+        default="random",
+        help="Use seeded random crops for paper alignment or centered crops for an ablation",
+    )
+    build.add_argument(
+        "--mind2web-prompt-protocol",
+        choices=MIND2WEB_PROMPT_PROTOCOLS,
+        default=TARGET_GROUNDING,
+        help=(
+            "target_grounding uses the step-specific target_action_reprs; "
+            "task_history retains the legacy planning-plus-grounding prompt"
+        ),
+    )
     build.add_argument("--shard-size", type=int, default=1000)
     build.add_argument("--force", action="store_true")
 

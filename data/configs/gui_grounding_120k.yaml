@@ -1,6 +1,6 @@
 vlm_parquet:
-  # Legacy alias. Prefer data/configs/gui_grounding_table1.yaml: Mind2Web now
-  # uses its published train split once instead of being expanded to 20K.
+  # Legacy alias. Prefer data/configs/gui_grounding_table1.yaml; both resolve
+  # to the paper-sized mixture selected by LLADAO_GUI_GROUNDING_DIR.
   dataset_names:
   - gui_grounding_120k
   image_transform_args:
