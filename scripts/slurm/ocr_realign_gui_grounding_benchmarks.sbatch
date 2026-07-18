@@ -19,7 +19,7 @@ set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR}}"
 ENVIRONMENT_FILE="${ENVIRONMENT_FILE:-${REPO_ROOT}/lladao.toml}"
 BENCHMARK_ROOT="${BENCHMARK_ROOT:-${SCRATCH}/datasets/lladao_gui_benchmarks}"
-WORK_DIR="${WORK_DIR:-${SCRATCH}/datasets/lladao_gui_benchmarks_ocr_work}"
+WORK_DIR="${WORK_DIR:-${SCRATCH}/datasets/lladao_gui_benchmarks_ocr_work_v2}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRATCH}/datasets/lladao_gui_benchmarks_ocr}"
 EASYOCR_MODEL_DIR="${EASYOCR_MODEL_DIR:-${SCRATCH}/models/easyocr}"
 OCR_VENV="${OCR_VENV:-${SCRATCH}/venvs/lladao-easyocr-1.7.2}"
@@ -55,7 +55,10 @@ srun \
       python -m venv --system-site-packages "${OCR_VENV}"
     fi
     source "${OCR_VENV}/bin/activate"
-    python -m pip install --upgrade-strategy only-if-needed "easyocr==1.7.2"
+    python -m pip install --upgrade --upgrade-strategy only-if-needed \
+      "numpy==1.26.4" \
+      "opencv-python-headless==4.11.0.86" \
+      "easyocr==1.7.2"
     python -c "import easyocr, os; easyocr.Reader(['\''en'\''], gpu=False, model_storage_directory=os.environ['\''EASYOCR_MODEL_DIR'\''], download_enabled=True)"
   '
 
