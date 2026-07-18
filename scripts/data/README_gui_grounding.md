@@ -159,6 +159,12 @@ After constructing the OCR-aligned corpus, use
 `scripts/slurm/gui-120k-ocr-target-finetune.sh` for a separate dense-checkpoint
 adaptation run. It never overwrites the DOM-target run.
 
+If held-out Mind2Web remains exposure-limited in the mixed run, use
+`scripts/slurm/gui-mind2web-ocr-target-finetune.sh` to finish from a validated
+mixed OCR checkpoint on the OCR-aligned Mind2Web rows. The finishing run uses a
+separate output directory, a lower learning rate, and dense checkpoints; select
+it by held-out Mind2Web and ScreenSpot results rather than its final step.
+
 The defaults target two Clariden GH200 nodes with four GPUs each and perform
 full-model BF16 fine-tuning with FSDP `FULL_SHARD`. The training and EMA models
 are constructed and sharded sequentially so each rank holds at most one full
