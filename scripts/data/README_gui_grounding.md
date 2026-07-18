@@ -96,6 +96,37 @@ sbatch scripts/slurm/prepare_gui_grounding_table1_aligned.sbatch
 The default destination is `$SCRATCH/datasets/lladao_gui_120k_target` and is
 deep-validated after the 20K Mind2Web bucket is written.
 
+### OCR-guided Mind2Web targets
+
+The paper replaces inconsistent icon-level Mind2Web boxes with linked OCR text
+regions, but does not publish its OCR engine or matching code. This repository
+provides a prediction-independent approximation: EasyOCR detections are matched
+using only the target description and original DOM box. A match must have both
+credible text similarity and spatial proximity; otherwise the original DOM box
+is retained. Every match, fallback, engine setting, and threshold is recorded
+in JSONL audit shards and the output manifest.
+
+On Clariden, build the OCR-aligned benchmark and training corpus with:
+
+```bash
+sbatch scripts/slurm/ocr_realign_gui_grounding_benchmarks.sbatch
+sbatch scripts/slurm/ocr_realign_gui_grounding_training.sbatch
+```
+
+The defaults write:
+
+```text
+${SCRATCH}/datasets/lladao_gui_benchmarks_ocr/
+${SCRATCH}/datasets/lladao_gui_120k_target_ocr/parquet/
+```
+
+The training rewrite changes only accepted Mind2Web coordinate labels. Images,
+prompts, action types, and typed values are preserved; the unchanged 100K rows
+are hard-linked rather than duplicated. OCR dependencies live in a separate
+NumPy-1.26-compatible venv so the active LLaDA-o training environment is not
+mutated. This remains an approximation because the paper's transformed boxes
+and OCR implementation are unavailable.
+
 ## Use with LLaDA-o
 
 ```bash
@@ -121,10 +152,14 @@ The repository includes three launchers:
 - `scripts/train_gui_grounding_120k.sh` contains the model and data arguments;
 - `scripts/slurm/train_gui_grounding_120k.sbatch` requests Slurm resources and
   starts one distributed launcher per node;
-- `scripts/slurm/gui-120k-grounding-finetune.sh` submits the standard one-node
-  Clariden production job from a login node.
+- `scripts/slurm/gui-120k-grounding-finetune.sh` submits the standard Clariden
+  production job from a login node.
 
-The defaults target one Clariden GH200 node with four GPUs and perform
+After constructing the OCR-aligned corpus, use
+`scripts/slurm/gui-120k-ocr-target-finetune.sh` for a separate dense-checkpoint
+adaptation run. It never overwrites the DOM-target run.
+
+The defaults target two Clariden GH200 nodes with four GPUs each and perform
 full-model BF16 fine-tuning with FSDP `FULL_SHARD`. The training and EMA models
 are constructed and sharded sequentially so each rank holds at most one full
 FP32 model in host memory during startup. The launch still requests the Clariden
@@ -328,8 +363,9 @@ Useful overrides include:
 | `SAVE_EVERY` | `500` | Checkpoint interval |
 | `LEARNING_RATE` | `2.5e-5` | Peak learning rate |
 | `WARMUP_STEPS` | `300` | Warm-up iterations |
-| `EXPECTED_NUM_TOKENS` | `32768` | Soft packed-token target per GPU rank |
-| `MAX_NUM_TOKENS` | `36864` | Hard packed-token limit per GPU rank |
+| `EXPECTED_NUM_TOKENS` | `6144` | Soft packed-token target per GPU rank |
+| `MAX_NUM_TOKENS` | `8192` | Hard packed-token limit per GPU rank |
+| `MAX_NUM_TOKENS_PER_SAMPLE` | `8192` | Per-example hard token limit |
 | `NUM_WORKERS` | `1` | DataLoader workers per GPU rank |
 | `FREEZE_VIT` | `False` | Freeze the vision encoder when `True` |
 | `CPU_OFFLOAD` | `False` | Offload FSDP parameters to CPU when `True` |
@@ -351,9 +387,8 @@ steps_per_epoch = 120000 / average_global_total_samples_per_step
 ```
 
 If CUDA runs out of memory, lower both `EXPECTED_NUM_TOKENS` and
-`MAX_NUM_TOKENS`, for example to `16384` and `18432`. Keep
-`MAX_NUM_TOKENS_PER_SAMPLE=16384` unless individual high-resolution examples
-are being skipped. Reducing token packing changes the number of samples per
+`MAX_NUM_TOKENS`. Keep `MAX_NUM_TOKENS_PER_SAMPLE` no larger than the hard
+packed-token limit. Reducing token packing changes the number of samples per
 step, so adjust `TOTAL_STEPS` accordingly.
 
 ### 5. Monitor and resume
