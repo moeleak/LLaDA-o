@@ -17,7 +17,10 @@ REPO_ROOT="${REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}"
 export TRAIN_DATA_DIR="${TRAIN_DATA_DIR:-${SCRATCH}/datasets/lladao_gui_120k_target_ocr/parquet}"
 export TRAIN_RESULTS_DIR="${TRAIN_RESULTS_DIR:-${SCRATCH}/runs/lladao_gui_120k_target_ocr}"
 export RESULTS_DIR="${TRAIN_RESULTS_DIR}"
-export RESUME_FROM="${RESUME_FROM:-${SCRATCH}/runs/lladao_gui_120k_target/checkpoints/0001500}"
+# Start from the last held-out-validated DOM checkpoint.  Later DOM checkpoints
+# are not automatically better and must only be selected after benchmark
+# validation; RESUME_FROM remains overridable for a different validated run.
+export RESUME_FROM="${RESUME_FROM:-${SCRATCH}/runs/lladao_gui_120k_target/checkpoints/0001000}"
 export JOB_NAME="${JOB_NAME:-gui-120k-ocr}"
 export WANDB_NAME="${WANDB_NAME:-gui-120k-ocr-grounding}"
 
