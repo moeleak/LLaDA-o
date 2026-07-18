@@ -154,6 +154,14 @@ splits, ScreenSpot diagnostics, the paper gap, and—when supplied—the same
 predictions rescored against the original DOM target boxes:
 
 ```bash
+sbatch scripts/slurm/summarize_gui_grounding_table3.sbatch
+```
+
+The Slurm entry point uses the project container instead of Clariden's legacy
+login-node Python. From an already active project environment, the equivalent
+direct command is:
+
+```bash
 python -m eval.gui_grounding.summarize_table3_sweep \
   --results-root "$SCRATCH/runs/lladao_gui_benchmark/table3-m2w-only" \
   --dom-benchmark-root "$SCRATCH/datasets/lladao_gui_benchmarks" \
