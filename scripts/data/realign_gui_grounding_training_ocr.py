@@ -27,6 +27,7 @@ from PIL import Image
 try:
     from .ocr_target_realignment import (
         OCR_REALIGNMENT_VERSION,
+        OCR_MATCH_CONFIG,
         OcrDetection,
         match_ocr_target,
         replace_action_bbox,
@@ -43,6 +44,7 @@ try:
 except ImportError:  # Direct execution: python scripts/data/<this file>.py
     from ocr_target_realignment import (
         OCR_REALIGNMENT_VERSION,
+        OCR_MATCH_CONFIG,
         OcrDetection,
         match_ocr_target,
         replace_action_bbox,
@@ -369,6 +371,7 @@ def finalize(args: argparse.Namespace) -> None:
         "version": OCR_REALIGNMENT_VERSION,
         "engine": f"easyocr=={EASYOCR_VERSION}",
         "engine_config": EASYOCR_CONFIG,
+        "matcher_config": OCR_MATCH_CONFIG,
         "rows": expected_rows,
         "matched": counters["ocr_matched"],
         "dom_fallback": counters["dom_fallback"],

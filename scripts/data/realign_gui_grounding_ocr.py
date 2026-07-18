@@ -29,6 +29,7 @@ from typing import Any, Iterable, Iterator
 try:
     from .ocr_target_realignment import (
         OCR_REALIGNMENT_VERSION,
+        OCR_MATCH_CONFIG,
         OcrDetection,
         match_ocr_target,
         scale_bbox,
@@ -37,6 +38,7 @@ try:
 except ImportError:  # Direct execution: python scripts/data/<this file>.py
     from ocr_target_realignment import (
         OCR_REALIGNMENT_VERSION,
+        OCR_MATCH_CONFIG,
         OcrDetection,
         match_ocr_target,
         scale_bbox,
@@ -396,6 +398,7 @@ def finalize(args: argparse.Namespace) -> None:
         "version": OCR_REALIGNMENT_VERSION,
         "engine": f"easyocr=={EASYOCR_VERSION}",
         "engine_config": EASYOCR_CONFIG,
+        "matcher_config": OCR_MATCH_CONFIG,
         "benchmark": args.benchmark,
         "samples": len(primary_samples),
         "matched": primary_matches,

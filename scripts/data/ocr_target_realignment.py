@@ -19,6 +19,25 @@ from typing import Any, Iterable, Mapping, Sequence
 
 
 OCR_REALIGNMENT_VERSION = "mind2web-easyocr-linked-text-v1"
+MINIMUM_OCR_CONFIDENCE = 0.20
+MINIMUM_TEXT_SIMILARITY = 0.68
+MAXIMUM_EDGE_DISTANCE = 0.22
+OCR_MATCH_CONFIG = {
+    "minimum_ocr_confidence": MINIMUM_OCR_CONFIDENCE,
+    "minimum_text_similarity": MINIMUM_TEXT_SIMILARITY,
+    "maximum_edge_distance_normalized": MAXIMUM_EDGE_DISTANCE,
+    "near_exact_similarity": 0.92,
+    "near_exact_distance_multiplier": 1.5,
+    "score_weights": {
+        "text_similarity": 0.72,
+        "spatial_proximity": 0.18,
+        "ocr_confidence": 0.07,
+        "source_iou": 0.03,
+    },
+    "accepted_box_policy": "replace DOM box with matched OCR detection xyxy",
+    "rejection_policy": "retain original DOM box",
+    "prediction_independent": True,
+}
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _GUI_ACTION_RE = re.compile(
     r"^(lclick|hover|type_in)\s+\[\s*[-+0-9., ]+\s*\](.*)$", re.DOTALL
@@ -247,9 +266,9 @@ def match_ocr_target(
     detections: Iterable[OcrDetection | Mapping[str, Any]],
     image_width: float,
     image_height: float,
-    minimum_ocr_confidence: float = 0.20,
-    minimum_text_similarity: float = 0.68,
-    maximum_edge_distance: float = 0.22,
+    minimum_ocr_confidence: float = MINIMUM_OCR_CONFIDENCE,
+    minimum_text_similarity: float = MINIMUM_TEXT_SIMILARITY,
+    maximum_edge_distance: float = MAXIMUM_EDGE_DISTANCE,
 ) -> OcrTargetMatch:
     """Link a target description to the best nearby OCR text region.
 
@@ -323,6 +342,7 @@ def match_ocr_target(
 
 __all__ = [
     "OCR_REALIGNMENT_VERSION",
+    "OCR_MATCH_CONFIG",
     "OcrDetection",
     "OcrTargetMatch",
     "bbox_edge_distance",
