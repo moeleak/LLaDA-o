@@ -43,14 +43,19 @@ export GPUS_PER_NODE="${GPUS_PER_NODE:-4}"
 export WALLTIME="${WALLTIME:-12:00:00}"
 export CHAIN_JOBS="${CHAIN_JOBS:-2}"
 
-for required in \
-  "${TRAIN_DATA_DIR}" \
-  "${REPO_ROOT}/scripts/slurm/gui-120k-grounding-finetune.sh"; do
+for required in "${REPO_ROOT}/scripts/slurm/gui-120k-grounding-finetune.sh"; do
   [[ -e "${required}" ]] || {
     echo "error: required input does not exist: ${required}" >&2
     exit 1
   }
 done
+if [[ ! -d "${TRAIN_DATA_DIR}" ]]; then
+  if [[ -z "${AFTER_JOB_ID:-}" ]]; then
+    echo "error: training data does not exist: ${TRAIN_DATA_DIR}" >&2
+    exit 1
+  fi
+  echo "Training data will be validated after dependency job ${AFTER_JOB_ID}: ${TRAIN_DATA_DIR}"
+fi
 if [[ ! -f "${RESUME_FROM}/ema.safetensors" && ! -f "${RESUME_FROM}/ema.safetensors.index.json" ]]; then
   echo "error: base checkpoint is missing below ${RESUME_FROM}" >&2
   exit 1
