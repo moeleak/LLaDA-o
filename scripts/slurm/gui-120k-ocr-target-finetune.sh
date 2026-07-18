@@ -21,10 +21,12 @@ export RESUME_FROM="${RESUME_FROM:-${SCRATCH}/runs/lladao_gui_120k_target/checkp
 export JOB_NAME="${JOB_NAME:-gui-120k-ocr}"
 export WANDB_NAME="${WANDB_NAME:-gui-120k-ocr-grounding}"
 
-# The paper does not publish its 120K optimizer schedule.  Save densely during
-# this annotation-adaptation stage and select checkpoints only from held-out
-# Mind2Web plus ScreenSpot results.
-export TOTAL_STEPS="${TOTAL_STEPS:-4001}"
+# The paper does not publish its 120K optimizer schedule.  At the observed
+# roughly 16 global samples per step, 7,500 steps cover about one 120K pass.
+# Save densely and select checkpoints only from held-out Mind2Web plus
+# ScreenSpot results; an earlier checkpoint can stop the chain if it reaches
+# the target without harming cross-domain scores.
+export TOTAL_STEPS="${TOTAL_STEPS:-7501}"
 export SAVE_EVERY="${SAVE_EVERY:-250}"
 export LOG_EVERY="${LOG_EVERY:-10}"
 export WARMUP_STEPS="${WARMUP_STEPS:-100}"
@@ -37,7 +39,7 @@ export MAX_NUM_TOKENS_PER_SAMPLE="${MAX_NUM_TOKENS_PER_SAMPLE:-8192}"
 export NNODES="${NNODES:-2}"
 export GPUS_PER_NODE="${GPUS_PER_NODE:-4}"
 export WALLTIME="${WALLTIME:-12:00:00}"
-export CHAIN_JOBS="${CHAIN_JOBS:-2}"
+export CHAIN_JOBS="${CHAIN_JOBS:-3}"
 
 for required in \
   "${TRAIN_DATA_DIR}/manifest.json" \
