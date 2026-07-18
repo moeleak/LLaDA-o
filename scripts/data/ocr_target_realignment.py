@@ -20,6 +20,9 @@ from typing import Any, Iterable, Mapping, Sequence
 
 OCR_REALIGNMENT_VERSION = "mind2web-easyocr-linked-text-v1"
 _WORD_RE = re.compile(r"[a-z0-9]+")
+_GUI_ACTION_RE = re.compile(
+    r"^(lclick|hover|type_in)\s+\[\s*[-+0-9., ]+\s*\](.*)$", re.DOTALL
+)
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -75,6 +78,19 @@ def text_similarity(target: Any, candidate: Any) -> float:
         coverage = len(shorter) / len(longer)
         containment = 0.82 + 0.18 * coverage
     return min(1.0, max(sequence, tokens, containment))
+
+
+def replace_action_bbox(answer: Any, bbox_1000: Iterable[Any]) -> str:
+    """Replace only the coordinate field while preserving action/value text."""
+
+    match = _GUI_ACTION_RE.fullmatch(str(answer or ""))
+    if match is None:
+        raise ValueError(f"invalid GUI action string: {answer!r}")
+    values = [int(value) for value in bbox_1000]
+    if len(values) != 4:
+        raise ValueError("GUI action bbox must contain four coordinates")
+    coords = ",".join(str(value) for value in values)
+    return f"{match.group(1)} [{coords}]{match.group(2)}"
 
 
 def valid_bbox(values: Sequence[Any]) -> tuple[float, float, float, float]:
@@ -312,6 +328,7 @@ __all__ = [
     "bbox_edge_distance",
     "match_ocr_target",
     "normalize_ocr_text",
+    "replace_action_bbox",
     "scale_bbox",
     "text_similarity",
     "unscale_bbox",

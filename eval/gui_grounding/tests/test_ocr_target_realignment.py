@@ -9,6 +9,7 @@ from scripts.data.ocr_target_realignment import (
     OcrDetection,
     match_ocr_target,
     normalize_ocr_text,
+    replace_action_bbox,
     scale_bbox,
     text_similarity,
     unscale_bbox,
@@ -59,6 +60,14 @@ class OcrTextMatchingTest(unittest.TestCase):
         self.assertEqual(normalized, [100, 100, 500, 600])
         restored = unscale_bbox(normalized, width=200, height=100)
         self.assertTrue(all(math.isclose(a, b) for a, b in zip(restored, (20, 10, 100, 60))))
+
+    def test_action_rewrite_preserves_type_value(self) -> None:
+        self.assertEqual(
+            replace_action_bbox("type_in [1,2,3,4] trail shoes", [10, 20, 30, 40]),
+            "type_in [10,20,30,40] trail shoes",
+        )
+        with self.assertRaises(ValueError):
+            replace_action_bbox("click the button", [10, 20, 30, 40])
 
 
 class OcrBenchmarkFinalizeTest(unittest.TestCase):
