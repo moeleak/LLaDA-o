@@ -177,6 +177,11 @@ checkpoint, trains with linear masking for approximately ten corpus passes,
 and saves every 250 optimizer steps around the measured ten-epoch point. This
 is intentionally separate from continuing a mixed-corpus checkpoint: the two
 experiments answer different questions and must not share an output directory.
+The paper omits optimizer details, so this launcher fills those gaps from the
+public LLaDA-V full-model fine-tuning recipe: AdamW with a `1e-5` peak learning
+rate, 3% warm-up, cosine decay, beta1/beta2 `0.9/0.999`, epsilon `1e-8`, and
+zero weight decay. These are evidence-based reproduction defaults, not
+paper-reported Table 3 hyperparameters.
 
 If held-out Mind2Web remains exposure-limited in the mixed run, use
 `scripts/slurm/gui-mind2web-ocr-target-finetune.sh` to finish from a validated
@@ -388,6 +393,8 @@ Useful overrides include:
 | `SAVE_EVERY` | `500` | Checkpoint interval |
 | `LEARNING_RATE` | `2.5e-5` | Peak learning rate |
 | `WARMUP_STEPS` | `300` | Warm-up iterations |
+| `ADAM_BETA1` / `ADAM_BETA2` | `0.9` / `0.95` | AdamW momentum coefficients |
+| `ADAM_EPS` | `1e-15` | AdamW numerical-stability epsilon |
 | `EXPECTED_NUM_TOKENS` | `6144` | Soft packed-token target per GPU rank |
 | `MAX_NUM_TOKENS` | `8192` | Hard packed-token limit per GPU rank |
 | `MAX_NUM_TOKENS_PER_SAMPLE` | `8192` | Per-example hard token limit |

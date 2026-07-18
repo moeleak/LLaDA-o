@@ -6,9 +6,10 @@
 # arXiv:2603.26211: 7,341 unique target-preserving crops, OCR-linked target
 # annotations, ten epochs, and linear masking.  The paper does not publish its
 # optimizer, learning rate, batch size, prompt template, crop seed, or OCR
-# matcher.  The defaults below retain this repository's optimizer recipe and
-# save densely around the measured ten-epoch point so held-out evaluation can
-# select the best checkpoint without using the test score for training.
+# matcher.  Where the paper is silent, the defaults below follow the public
+# LLaDA-V full-model fine-tuning launcher (AdamW, 1e-5 peak LR, 3% warm-up,
+# cosine decay, beta1=0.9, beta2=0.999, eps=1e-8).  Checkpoints are saved
+# densely around the measured ten-epoch point for held-out evaluation.
 
 set -euo pipefail
 
@@ -31,9 +32,13 @@ export WANDB_NAME="${WANDB_NAME:-mind2web-table3-ocr-10ep}"
 export TOTAL_STEPS="${TOTAL_STEPS:-4751}"
 export SAVE_EVERY="${SAVE_EVERY:-250}"
 export LOG_EVERY="${LOG_EVERY:-10}"
-export WARMUP_STEPS="${WARMUP_STEPS:-300}"
-export LEARNING_RATE="${LEARNING_RATE:-2.5e-5}"
-export LR_SCHEDULER="${LR_SCHEDULER:-constant}"
+export WARMUP_STEPS="${WARMUP_STEPS:-143}"
+export LEARNING_RATE="${LEARNING_RATE:-1e-5}"
+export MIN_LR="${MIN_LR:-0}"
+export LR_SCHEDULER="${LR_SCHEDULER:-cosine}"
+export ADAM_BETA1="${ADAM_BETA1:-0.9}"
+export ADAM_BETA2="${ADAM_BETA2:-0.999}"
+export ADAM_EPS="${ADAM_EPS:-1e-8}"
 export EMA_DECAY="${EMA_DECAY:-0.995}"
 export EXPECTED_NUM_TOKENS="${EXPECTED_NUM_TOKENS:-6144}"
 export MAX_NUM_TOKENS="${MAX_NUM_TOKENS:-8192}"

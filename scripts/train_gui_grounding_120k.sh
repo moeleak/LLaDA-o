@@ -52,6 +52,9 @@ LOG_EVERY="${LOG_EVERY:-10}"
 LEARNING_RATE="${LEARNING_RATE:-2.5e-5}"
 MIN_LR="${MIN_LR:-1e-7}"
 LR_SCHEDULER="${LR_SCHEDULER:-constant}"
+ADAM_BETA1="${ADAM_BETA1:-0.9}"
+ADAM_BETA2="${ADAM_BETA2:-0.95}"
+ADAM_EPS="${ADAM_EPS:-1e-15}"
 EMA_DECAY="${EMA_DECAY:-0.995}"
 MAX_GRAD_NORM="${MAX_GRAD_NORM:-1.0}"
 
@@ -156,6 +159,9 @@ training_args=(
   --lr_scheduler "${LR_SCHEDULER}"
   --lr "${LEARNING_RATE}"
   --min_lr "${MIN_LR}"
+  --beta1 "${ADAM_BETA1}"
+  --beta2 "${ADAM_BETA2}"
+  --eps "${ADAM_EPS}"
   --ema "${EMA_DECAY}"
   --max_grad_norm "${MAX_GRAD_NORM}"
   --ce_weight 1.0
@@ -176,6 +182,8 @@ echo "  model                  : ${MODEL_PATH}"
 echo "  data                   : ${LLADAO_GUI_GROUNDING_DIR}"
 echo "  results                : ${RESULTS_DIR}"
 echo "  total / save steps     : ${TOTAL_STEPS} / ${SAVE_EVERY}"
+echo "  lr / scheduler         : ${LEARNING_RATE} / ${LR_SCHEDULER}"
+echo "  Adam beta1/beta2/eps   : ${ADAM_BETA1} / ${ADAM_BETA2} / ${ADAM_EPS}"
 echo "  token target / maximum : ${EXPECTED_NUM_TOKENS} / ${MAX_NUM_TOKENS}"
 
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
