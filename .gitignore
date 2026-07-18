@@ -6,5 +6,7 @@ results
 *.ipynb_checkpoints
 eval_results
 tests
+!tests/
+!tests/*.py
 .DS_Store
 gradio.sh
