@@ -1153,6 +1153,7 @@ class LLaDAO(PreTrainedModel):
         split_lens: List[int] = None,
         attn_modes: List[str] = None,
         update_cache: bool = False,
+        attention_bias: Optional[torch.Tensor] = None,
     ):
         """
         Support generation forward pass with cache
@@ -1193,6 +1194,7 @@ class LLaDAO(PreTrainedModel):
             packed_key_value_indexes=packed_key_value_indexes,
             update_past_key_values=update_cache,
             is_causal=False,
+            attention_bias=attention_bias,
             **extra_inputs,
         )
         

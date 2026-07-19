@@ -193,6 +193,69 @@ def pad_sequence(tensor, pad_size):
     return torch.cat([tensor, pad_tensor], dim=1)
 
 
+def attention_with_optional_bias(
+    query_states,
+    key_states,
+    value_states,
+    query_lens,
+    key_value_lens,
+    *,
+    is_causal,
+    attention_bias=None,
+):
+    """Run varlen FlashAttention or a D2F block-biased SDPA fallback.
+
+    D2F pipelines several answer blocks at once.  A single causal flag cannot
+    express "bidirectional within a block, causal across blocks", so that path
+    supplies an additive [1, 1, Q, K] bias.  GUI inference is batch size one;
+    retaining that restriction keeps the cache layout identical to the
+    existing packed inference path.
+    """
+    if attention_bias is None:
+        cu_seqlens_q = torch.nn.functional.pad(torch.cumsum(query_lens, dim=0), (1, 0))
+        cu_seqlens_k = torch.nn.functional.pad(torch.cumsum(key_value_lens, dim=0), (1, 0))
+        return flash_attn_varlen_func(
+            q=query_states,
+            k=key_states,
+            v=value_states,
+            cu_seqlens_q=cu_seqlens_q.to(torch.int32),
+            cu_seqlens_k=cu_seqlens_k.to(torch.int32),
+            max_seqlen_q=max(query_lens).item(),
+            max_seqlen_k=max(key_value_lens).item(),
+            causal=is_causal,
+        )
+
+    if len(query_lens) != 1 or len(key_value_lens) != 1:
+        raise ValueError("D2F attention_bias inference currently requires batch size one")
+    q_len = int(query_lens[0].item())
+    kv_len = int(key_value_lens[0].item())
+    if attention_bias.shape[-2:] != (q_len, kv_len):
+        raise ValueError(
+            f"attention_bias has shape {tuple(attention_bias.shape)}, "
+            f"expected (..., {q_len}, {kv_len})"
+        )
+
+    query = query_states.transpose(0, 1).unsqueeze(0)
+    key = key_states.transpose(0, 1).unsqueeze(0)
+    value = value_states.transpose(0, 1).unsqueeze(0)
+    if query.shape[1] != key.shape[1]:
+        if query.shape[1] % key.shape[1] != 0:
+            raise ValueError("query heads must be divisible by key/value heads")
+        groups = query.shape[1] // key.shape[1]
+        key = key.repeat_interleave(groups, dim=1)
+        value = value.repeat_interleave(groups, dim=1)
+    bias = attention_bias.to(device=query.device, dtype=query.dtype)
+    output = scaled_dot_product_attention(
+        query,
+        key,
+        value,
+        attn_mask=bias,
+        dropout_p=0.0,
+        is_causal=False,
+    )
+    return output.squeeze(0).transpose(0, 1)
+
+
 class PackedAttention(LLaDAAttention):
     def __init__(self, config, layer_idx: Optional[int] = None):
         super().__init__(config, layer_idx)
@@ -281,6 +344,7 @@ class PackedAttention(LLaDAAttention):
         packed_key_value_indexes: Optional[torch.Tensor] = None,
         update_past_key_values=True,
         is_causal=True,
+        attention_bias=None,
     ):
         # Not yet modified to support dllm
         packed_query_states = self.q_proj(packed_query_sequence).view(-1, self.num_heads, self.head_dim)
@@ -316,18 +380,14 @@ class PackedAttention(LLaDAAttention):
             merged_value_states = packed_value_states
             key_values_lens = query_lens
 
-        cu_seqlens_q = torch.nn.functional.pad(torch.cumsum(query_lens, dim=0), (1, 0))
-        cu_seqlens_k = torch.nn.functional.pad(torch.cumsum(key_values_lens, dim=0), (1, 0))
-
-        packed_attn_output = flash_attn_varlen_func(
-            q=packed_query_states,
-            k=merged_key_states,
-            v=merged_value_states,
-            cu_seqlens_q=cu_seqlens_q.to(torch.int32),
-            cu_seqlens_k=cu_seqlens_k.to(torch.int32),
-            max_seqlen_q=max(query_lens).item(),
-            max_seqlen_k=max(key_values_lens).item(),
-            causal=is_causal,
+        packed_attn_output = attention_with_optional_bias(
+            packed_query_states,
+            merged_key_states,
+            merged_value_states,
+            query_lens,
+            key_values_lens,
+            is_causal=is_causal,
+            attention_bias=attention_bias,
         )
         packed_attn_output = packed_attn_output.reshape(-1, self.hidden_size)
         packed_attn_output = self.o_proj(packed_attn_output)
@@ -468,6 +528,7 @@ class PackedAttentionMoT(LLaDAAttention):
         packed_key_value_indexes: Optional[torch.Tensor] = None,
         update_past_key_values=True,
         is_causal=True,
+        attention_bias=None,
         mode="und",
         packed_vae_token_indexes=None,
         packed_text_indexes=None,
@@ -535,18 +596,14 @@ class PackedAttentionMoT(LLaDAAttention):
             merged_value_states = packed_value_states
             key_values_lens = query_lens
 
-        cu_seqlens_q = torch.nn.functional.pad(torch.cumsum(query_lens, dim=0), (1, 0))
-        cu_seqlens_k = torch.nn.functional.pad(torch.cumsum(key_values_lens, dim=0), (1, 0))
-
-        packed_attn_output = flash_attn_varlen_func(
-            q=packed_query_states,
-            k=merged_key_states,
-            v=merged_value_states,
-            cu_seqlens_q=cu_seqlens_q.to(torch.int32),
-            cu_seqlens_k=cu_seqlens_k.to(torch.int32),
-            max_seqlen_q=max(query_lens).item(),
-            max_seqlen_k=max(key_values_lens).item(),
-            causal=is_causal,
+        packed_attn_output = attention_with_optional_bias(
+            packed_query_states,
+            merged_key_states,
+            merged_value_states,
+            query_lens,
+            key_values_lens,
+            is_causal=is_causal,
+            attention_bias=attention_bias,
         )
         packed_attn_output = packed_attn_output.reshape(-1, self.hidden_size)
         if mode == 'und':
@@ -618,6 +675,7 @@ class LLaDADecoderLayer(nn.Module):
         packed_key_value_indexes: Optional[torch.Tensor] = None,
         update_past_key_values=True,
         is_causal=True,
+        attention_bias=None,
     ) -> BaseNavitOutputWithPast:
         # Not yet modified to support dllm
 
@@ -635,6 +693,7 @@ class LLaDADecoderLayer(nn.Module):
             packed_key_value_indexes=packed_key_value_indexes,
             update_past_key_values=update_past_key_values,
             is_causal=is_causal,
+            attention_bias=attention_bias,
         )
         packed_query_sequence = residual + packed_query_sequence
 
@@ -728,6 +787,7 @@ class LLaDAMoTDecoderLayer(nn.Module):
         packed_key_value_indexes: Optional[torch.Tensor] = None,
         update_past_key_values=True,
         is_causal=True,
+        attention_bias=None,
         mode="und",
         packed_vae_token_indexes=None,
         packed_text_indexes=None,
@@ -754,6 +814,7 @@ class LLaDAMoTDecoderLayer(nn.Module):
             packed_key_value_indexes=packed_key_value_indexes,
             update_past_key_values=update_past_key_values,
             is_causal=is_causal,
+            attention_bias=attention_bias,
             mode=mode,
             packed_vae_token_indexes=packed_vae_token_indexes,
             packed_text_indexes=packed_text_indexes,
@@ -845,6 +906,7 @@ class LLaDAMoEDecoderLayer(nn.Module):
         packed_key_value_indexes: Optional[torch.Tensor] = None,
         update_past_key_values=True,
         is_causal=True,
+        attention_bias=None,
         mode="und",
         packed_vae_token_indexes=None,
         packed_text_indexes=None,
@@ -865,6 +927,7 @@ class LLaDAMoEDecoderLayer(nn.Module):
             packed_key_value_indexes=packed_key_value_indexes,
             update_past_key_values=update_past_key_values,
             is_causal=is_causal,
+            attention_bias=attention_bias,
         )
         packed_query_sequence = residual + packed_query_sequence
 
@@ -991,6 +1054,7 @@ class LLaDAModel(LLaDAPreTrainedModel):
         packed_key_value_indexes: Optional[torch.Tensor] = None,
         update_past_key_values=True,
         is_causal=True,
+        attention_bias=None,
         mode="und",
         packed_vae_token_indexes=None,
         packed_text_indexes=None,
@@ -1025,6 +1089,7 @@ class LLaDAModel(LLaDAPreTrainedModel):
                 packed_key_value_indexes=packed_key_value_indexes,
                 update_past_key_values=update_past_key_values,
                 is_causal=is_causal,
+                attention_bias=attention_bias,
                 **extra_inputs,
             )
 
@@ -1126,6 +1191,7 @@ class LLaDAModelLM(LLaDAPreTrainedModel):
         packed_key_value_indexes: Optional[torch.Tensor] = None,
         update_past_key_values=True,
         is_causal=True,
+        attention_bias=None,
         mode="und",
         packed_vae_token_indexes=None,
         packed_text_indexes=None,
@@ -1141,6 +1207,7 @@ class LLaDAModelLM(LLaDAPreTrainedModel):
             packed_key_value_indexes=packed_key_value_indexes,
             update_past_key_values=update_past_key_values,
             is_causal=is_causal,
+            attention_bias=attention_bias,
             mode=mode,
             packed_vae_token_indexes=packed_vae_token_indexes,
             packed_text_indexes=packed_text_indexes,

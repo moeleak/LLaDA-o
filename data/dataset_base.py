@@ -209,6 +209,12 @@ class PackedDataset(torch.utils.data.IterableDataset):
             packed_label_ids            = list(),
             ce_loss_indexes             = list(),
             ce_loss_weights             = list(),
+            # Per-sample (start, length) spans for supervised text responses.
+            # Spans are local to each packed sample and include the clean response
+            # BOS so training block boundaries exactly match cached inference.
+            # D2F uses these spans to rebuild clean answers and apply block-wise
+            # corruption without making assumptions about the image/prompt length.
+            d2f_response_spans           = list(),
             vae_image_tensors           = list(), 
             packed_latent_position_ids  = list(),
             vae_latent_shapes           = list(), 
@@ -229,6 +235,7 @@ class PackedDataset(torch.utils.data.IterableDataset):
             packed_text_ids=torch.tensor(sequence_status['packed_text_ids']),
             packed_text_indexes=torch.tensor(sequence_status['packed_text_indexes']),
             packed_position_ids=torch.tensor(sequence_status['packed_position_ids']),
+            d2f_response_spans=sequence_status['d2f_response_spans'],
         )
         if not self.use_flex:
             data['nested_attention_masks'] = sequence_status['nested_attention_masks']
@@ -266,6 +273,7 @@ class PackedDataset(torch.utils.data.IterableDataset):
                 data['split_lens'] = sequence_status['split_lens'] + [pad_len]
                 data['attn_modes'] = sequence_status['attn_modes'] + ['full'] # from causal to full for dllm
                 data['sample_lens'] += [pad_len]
+                data['d2f_response_spans'] += [[]]
 
         # if the model has a convnet vae (e.g., as visual tokenizer)
         if len(sequence_status['vae_image_tensors']) > 0:
@@ -433,6 +441,8 @@ class PackedDataset(torch.utils.data.IterableDataset):
 
         split_lens, attn_modes = list(), list()
         curr = sequence_status['curr']
+        sample_start = curr
+        sample_response_spans = []
         curr_rope_id = 0
         sample_lens = 0
 
@@ -467,6 +477,9 @@ class PackedDataset(torch.utils.data.IterableDataset):
                             if sum(masked_indices) > 0:
                                 break
                         noisy_text_ids = [self.bos_token_id] + masked_text_ids # add padded and masked text
+                        sample_response_spans.append(
+                            (curr - sample_start, len(noisy_text_ids))
+                        )
                         
                         # Calculate absolute position indices where masked_indices is True. Use list comprehension
                         # to filter indices with True values and add the current offset curr
@@ -721,6 +734,7 @@ class PackedDataset(torch.utils.data.IterableDataset):
 
         sequence_status['curr'] = curr
         sequence_status['sample_lens'].append(sample_lens)
+        sequence_status['d2f_response_spans'].append(sample_response_spans)
         if getattr(self.data_config, 'merge_vit_text_segments', False):
             if all(item['type'] in ['text', 'vit_image'] for item in sequence_plan) and split_lens:
                 # Merge all segment lengths into a single total, following LLaDA-V's approach. For pure text or vit+text mixed input
@@ -750,6 +764,7 @@ class SimpleCustomBatch:
         self.packed_text_ids = data["packed_text_ids"]
         self.packed_text_indexes = data["packed_text_indexes"]
         self.packed_position_ids = data["packed_position_ids"]
+        self.d2f_response_spans = data["d2f_response_spans"]
 
         self.use_flex = "nested_attention_masks" not in data.keys()
 
@@ -847,6 +862,7 @@ class SimpleCustomBatch:
             packed_text_ids = self.packed_text_ids,
             packed_text_indexes = self.packed_text_indexes,
             packed_position_ids = self.packed_position_ids,
+            d2f_response_spans = self.d2f_response_spans,
             batch_data_indexes = self.batch_data_indexes,
         )
 
