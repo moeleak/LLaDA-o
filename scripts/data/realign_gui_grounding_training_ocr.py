@@ -36,9 +36,11 @@ try:
     )
     from .realign_gui_grounding_ocr import (
         EASYOCR_CONFIG,
+        EASYOCR_SPATIAL_PREFILTER_CONFIG,
         EASYOCR_VERSION,
         build_easyocr_reader,
         load_jsonl,
+        read_spatially_relevant_text,
         sha256_file,
     )
 except ImportError:  # Direct execution: python scripts/data/<this file>.py
@@ -53,9 +55,11 @@ except ImportError:  # Direct execution: python scripts/data/<this file>.py
     )
     from realign_gui_grounding_ocr import (
         EASYOCR_CONFIG,
+        EASYOCR_SPATIAL_PREFILTER_CONFIG,
         EASYOCR_VERSION,
         build_easyocr_reader,
         load_jsonl,
+        read_spatially_relevant_text,
         sha256_file,
     )
 
@@ -95,22 +99,38 @@ class DetectionCache:
         self.maximum = maximum
         self.values: OrderedDict[str, list[OcrDetection]] = OrderedDict()
 
-    def get_or_run(self, reader: Any, data: bytes) -> list[OcrDetection]:
+    def get_or_run(
+        self,
+        reader: Any,
+        data: bytes,
+        *,
+        source_bbox_xyxy: tuple[float, float, float, float],
+        image_width: int,
+        image_height: int,
+    ) -> list[OcrDetection]:
         digest = hashlib.sha256(data).hexdigest()
-        cached = self.values.get(digest)
+        cache_key = f"{digest}:{','.join(f'{value:.3f}' for value in source_bbox_xyxy)}"
+        cached = self.values.get(cache_key)
         if cached is not None:
-            self.values.move_to_end(digest)
+            self.values.move_to_end(cache_key)
             return cached
         import numpy as np
 
         with Image.open(io.BytesIO(data)) as source:
             source.load()
             array = np.asarray(source.convert("RGB"))
+        raw_detections = read_spatially_relevant_text(
+            reader,
+            array,
+            source_bbox_xyxy=source_bbox_xyxy,
+            image_width=image_width,
+            image_height=image_height,
+        )
         detections = [
             OcrDetection.from_easyocr(value)
-            for value in reader.readtext(array, **EASYOCR_CONFIG)
+            for value in raw_detections
         ]
-        self.values[digest] = detections
+        self.values[cache_key] = detections
         if len(self.values) > self.maximum:
             self.values.popitem(last=False)
         return detections
@@ -127,10 +147,17 @@ def realign_row(
     data = image_bytes(row)
     with Image.open(io.BytesIO(data)) as source:
         width, height = source.size
-    detections = cache.get_or_run(reader, data)
+    dom_bbox_pixels = unscale_bbox(dom_bbox, width, height)
+    detections = cache.get_or_run(
+        reader,
+        data,
+        source_bbox_xyxy=dom_bbox_pixels,
+        image_width=width,
+        image_height=height,
+    )
     match = match_ocr_target(
         target_text=description,
-        source_bbox_xyxy=unscale_bbox(dom_bbox, width, height),
+        source_bbox_xyxy=dom_bbox_pixels,
         detections=detections,
         image_width=width,
         image_height=height,
@@ -236,7 +263,9 @@ def rewrite_shard(
     count = 0
     cache = DetectionCache()
     try:
-        with audit_temporary.open("w", encoding="utf-8") as audit_handle:
+        with audit_temporary.open(
+            "w", encoding="utf-8", buffering=1
+        ) as audit_handle:
             for row_group in range(parquet.num_row_groups):
                 output_rows: list[dict[str, Any]] = []
                 for row in parquet.read_row_group(row_group).to_pylist():
@@ -371,6 +400,7 @@ def finalize(args: argparse.Namespace) -> None:
         "version": OCR_REALIGNMENT_VERSION,
         "engine": f"easyocr=={EASYOCR_VERSION}",
         "engine_config": EASYOCR_CONFIG,
+        "spatial_prefilter": EASYOCR_SPATIAL_PREFILTER_CONFIG,
         "matcher_config": OCR_MATCH_CONFIG,
         "rows": expected_rows,
         "matched": counters["ocr_matched"],

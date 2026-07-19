@@ -28,19 +28,25 @@ from typing import Any, Iterable, Iterator
 
 try:
     from .ocr_target_realignment import (
+        MAXIMUM_EDGE_DISTANCE,
         OCR_REALIGNMENT_VERSION,
         OCR_MATCH_CONFIG,
         OcrDetection,
+        bbox_edge_distance,
         match_ocr_target,
+        polygon_bbox,
         scale_bbox,
         unscale_bbox,
     )
 except ImportError:  # Direct execution: python scripts/data/<this file>.py
     from ocr_target_realignment import (
+        MAXIMUM_EDGE_DISTANCE,
         OCR_REALIGNMENT_VERSION,
         OCR_MATCH_CONFIG,
         OcrDetection,
+        bbox_edge_distance,
         match_ocr_target,
+        polygon_bbox,
         scale_bbox,
         unscale_bbox,
     )
@@ -61,6 +67,12 @@ EASYOCR_CONFIG = {
     "text_threshold": 0.6,
     "low_text": 0.3,
     "link_threshold": 0.4,
+}
+EASYOCR_MAXIMUM_CANDIDATE_DISTANCE = MAXIMUM_EDGE_DISTANCE * 1.5
+EASYOCR_SPATIAL_PREFILTER_CONFIG = {
+    "enabled": True,
+    "maximum_edge_distance_normalized": EASYOCR_MAXIMUM_CANDIDATE_DISTANCE,
+    "policy": "detect globally; recognize only geometry the matcher could accept",
 }
 
 
@@ -153,6 +165,65 @@ def build_easyocr_reader(args: argparse.Namespace) -> Any:
     )
 
 
+def _horizontal_bbox(values: list[float]) -> tuple[float, float, float, float]:
+    if len(values) != 4:
+        raise ValueError("EasyOCR horizontal candidate must have four coordinates")
+    x_min, x_max, y_min, y_max = map(float, values)
+    return x_min, y_min, x_max, y_max
+
+
+def read_spatially_relevant_text(
+    reader: Any,
+    image: Any,
+    *,
+    source_bbox_xyxy: list[float] | tuple[float, float, float, float],
+    image_width: int,
+    image_height: int,
+) -> list[Any]:
+    """Detect globally, then recognize only boxes the matcher could accept.
+
+    Text recognition dominates EasyOCR CPU time on dense web screenshots.
+    The matcher rejects fuzzy candidates beyond ``MAXIMUM_EDGE_DISTANCE`` and
+    even near-exact candidates beyond 1.5 times that value. Filtering detected
+    geometry at the larger bound therefore cannot remove an accepted match.
+    """
+    horizontal_aggregate, free_aggregate = reader.detect(
+        image,
+        text_threshold=EASYOCR_CONFIG["text_threshold"],
+        low_text=EASYOCR_CONFIG["low_text"],
+        link_threshold=EASYOCR_CONFIG["link_threshold"],
+        canvas_size=EASYOCR_CONFIG["canvas_size"],
+        mag_ratio=EASYOCR_CONFIG["mag_ratio"],
+    )
+    horizontal = horizontal_aggregate[0]
+    free = free_aggregate[0]
+
+    def relevant(bbox: tuple[float, float, float, float]) -> bool:
+        return (
+            bbox_edge_distance(
+                source_bbox_xyxy,
+                bbox,
+                image_width,
+                image_height,
+            )
+            <= EASYOCR_MAXIMUM_CANDIDATE_DISTANCE
+        )
+
+    horizontal = [values for values in horizontal if relevant(_horizontal_bbox(values))]
+    free = [values for values in free if relevant(polygon_bbox(values))]
+    return reader.recognize(
+        image,
+        horizontal_list=horizontal,
+        free_list=free,
+        decoder=EASYOCR_CONFIG["decoder"],
+        beamWidth=EASYOCR_CONFIG["beamWidth"],
+        batch_size=EASYOCR_CONFIG["batch_size"],
+        workers=EASYOCR_CONFIG["workers"],
+        detail=EASYOCR_CONFIG["detail"],
+        paragraph=EASYOCR_CONFIG["paragraph"],
+    )
+
+
 def target_description(sample: dict[str, Any]) -> str:
     provenance = sample.get("provenance") or {}
     description = str(provenance.get("target_description") or "").strip()
@@ -169,17 +240,24 @@ def detect_one(
 ) -> dict[str, Any]:
     image_relative = str(sample["image"])
     image_path = root / image_relative
-    if image_relative not in detection_cache:
-        raw_detections = reader.readtext(str(image_path), **EASYOCR_CONFIG)
-        detection_cache[image_relative] = [
-            OcrDetection.from_easyocr(value) for value in raw_detections
-        ]
-    detections = detection_cache[image_relative]
-
     width = int(sample["image_width"])
     height = int(sample["image_height"])
     dom_bbox_1000 = list(sample["target_bbox_1000"])
     dom_bbox_pixels = unscale_bbox(dom_bbox_1000, width, height)
+    cache_key = f"{image_relative}:{','.join(map(str, dom_bbox_1000))}"
+    if cache_key not in detection_cache:
+        raw_detections = read_spatially_relevant_text(
+            reader,
+            str(image_path),
+            source_bbox_xyxy=dom_bbox_pixels,
+            image_width=width,
+            image_height=height,
+        )
+        detection_cache[cache_key] = [
+            OcrDetection.from_easyocr(value) for value in raw_detections
+        ]
+    detections = detection_cache[cache_key]
+
     description = target_description(sample)
     match = match_ocr_target(
         target_text=description,
@@ -412,6 +490,7 @@ def finalize(args: argparse.Namespace) -> None:
         "version": OCR_REALIGNMENT_VERSION,
         "engine": f"easyocr=={EASYOCR_VERSION}",
         "engine_config": EASYOCR_CONFIG,
+        "spatial_prefilter": EASYOCR_SPATIAL_PREFILTER_CONFIG,
         "matcher_config": OCR_MATCH_CONFIG,
         "benchmark": args.benchmark,
         "samples": len(primary_samples),
