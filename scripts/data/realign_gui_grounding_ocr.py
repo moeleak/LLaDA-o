@@ -121,6 +121,7 @@ def completed_ids(path: Path) -> set[str]:
 def build_easyocr_reader(args: argparse.Namespace) -> Any:
     try:
         import easyocr
+        import torch
     except ImportError as exc:
         raise RuntimeError(
             f"EasyOCR {EASYOCR_VERSION} is required for detect; install easyocr=={EASYOCR_VERSION}"
@@ -129,6 +130,19 @@ def build_easyocr_reader(args: argparse.Namespace) -> Any:
     languages = [value.strip() for value in args.languages.split(",") if value.strip()]
     if not languages:
         raise ValueError("at least one OCR language is required")
+    if not args.gpu:
+        intraop_threads = int(os.environ.get("EASYOCR_TORCH_THREADS", "0"))
+        interop_threads = int(os.environ.get("EASYOCR_TORCH_INTEROP_THREADS", "0"))
+        if intraop_threads > 0:
+            torch.set_num_threads(intraop_threads)
+        if interop_threads > 0:
+            try:
+                torch.set_num_interop_threads(interop_threads)
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    "EASYOCR_TORCH_INTEROP_THREADS must be configured before "
+                    "parallel Torch work starts"
+                ) from exc
     args.model_dir.mkdir(parents=True, exist_ok=True)
     return easyocr.Reader(
         languages,
