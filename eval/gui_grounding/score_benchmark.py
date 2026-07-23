@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import sys
 import statistics
 from collections import defaultdict
@@ -81,8 +82,100 @@ def joined_records(
         row["target_action"] = target["target_action"]
         row["target_bbox_1000"] = target["target_bbox_1000"]
         row["split"] = target.get("split", "test")
+        row["sequence_tokens"] = target.get("sequence_tokens")
+        row["input_protocol"] = target.get("input_protocol")
         joined.append(row)
     return joined
+
+
+def numeric_summary(values: Iterable[Any]) -> dict[str, float | int | None]:
+    finite = sorted(
+        float(value)
+        for value in values
+        if isinstance(value, (int, float))
+        and math.isfinite(float(value))
+    )
+    if not finite:
+        return {
+            "count": 0,
+            "mean": None,
+            "p50": None,
+            "p95": None,
+            "min": None,
+            "max": None,
+        }
+
+    def percentile(q: float) -> float:
+        position = (len(finite) - 1) * q
+        lower = math.floor(position)
+        upper = math.ceil(position)
+        if lower == upper:
+            return finite[lower]
+        fraction = position - lower
+        return (
+            finite[lower] * (1.0 - fraction)
+            + finite[upper] * fraction
+        )
+
+    return {
+        "count": len(finite),
+        "mean": statistics.fmean(finite),
+        "p50": percentile(0.50),
+        "p95": percentile(0.95),
+        "min": finite[0],
+        "max": finite[-1],
+    }
+
+
+def runtime_metrics(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    records = list(rows)
+    fields = (
+        "model_elapsed_seconds",
+        "image_cache_seconds",
+        "prompt_cache_seconds",
+        "generation_seconds",
+        "dense_prefix_tokens",
+        "cached_prefix_tokens",
+        "kv_cache_compression_ratio",
+        "kv_cache_compression_seconds",
+        "peak_memory_allocated_gib",
+        "peak_memory_reserved_gib",
+        "input_images",
+    )
+    result = {
+        field: numeric_summary(row.get(field) for row in records)
+        for field in fields
+    }
+    throughput = []
+    for row in records:
+        elapsed = row.get("model_elapsed_seconds")
+        sequence = row.get("sequence_tokens") or {}
+        total = sequence.get("total")
+        if (
+            isinstance(elapsed, (int, float))
+            and elapsed > 0
+            and isinstance(total, (int, float))
+        ):
+            throughput.append(float(total) / float(elapsed))
+    result["total_tokens_per_second"] = numeric_summary(throughput)
+    result["errors"] = sum(bool(row.get("error")) for row in records)
+    return result
+
+
+def context_bucket(row: dict[str, Any]) -> str | None:
+    sequence = row.get("sequence_tokens")
+    if not isinstance(sequence, dict):
+        return None
+    total = sequence.get("total")
+    if not isinstance(total, (int, float)):
+        return None
+    if total <= 32_768:
+        return "16k_32k"
+    if total <= 49_152:
+        return "32k_48k"
+    if total <= 65_536:
+        return "48k_64k"
+    return "above_64k"
 
 
 def paper_row(benchmark: str, metrics: dict[str, Any]) -> dict[str, Any]:
@@ -145,6 +238,8 @@ def main() -> None:
         "protocol_notes": manifest.get("protocol_notes", []),
         "benchmarks": {},
         "subgroups": {},
+        "context_length_subgroups": {},
+        "runtime": {},
         "coverage": {},
     }
     table: list[dict[str, Any]] = []
@@ -165,6 +260,7 @@ def main() -> None:
         joined = joined_records(targets, predictions)
         metrics = score_records(joined)
         result["benchmarks"][benchmark] = metrics
+        result["runtime"][benchmark] = runtime_metrics(joined)
         result["coverage"][benchmark] = {
             "targets": len(targets),
             "predictions": len(predictions),
@@ -179,6 +275,19 @@ def main() -> None:
         if len(by_split) > 1:
             result["subgroups"][benchmark] = {
                 split: score_records(rows) for split, rows in sorted(by_split.items())
+            }
+        by_context: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in joined:
+            bucket = context_bucket(row)
+            if bucket is not None:
+                by_context[bucket].append(row)
+        if by_context:
+            result["context_length_subgroups"][benchmark] = {
+                bucket: {
+                    "quality": score_records(rows),
+                    "runtime": runtime_metrics(rows),
+                }
+                for bucket, rows in sorted(by_context.items())
             }
 
     if table:

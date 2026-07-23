@@ -157,6 +157,28 @@ def write_image_once(root: Path, category: str, data: bytes) -> str:
     return relative.as_posix()
 
 
+def write_source_image_once(root: Path, category: str, data: bytes) -> str:
+    """Persist source screenshot bytes without resizing or re-encoding."""
+
+    digest = sha256_bytes(data)
+    with Image.open(io.BytesIO(data)) as image:
+        image_format = str(image.format or "bin").lower()
+    suffix = {
+        "jpeg": "jpg",
+        "jpg": "jpg",
+        "png": "png",
+        "webp": "webp",
+    }.get(image_format, image_format)
+    relative = Path("images") / category / digest[:2] / f"{digest}.{suffix}"
+    destination = root / relative
+    if not destination.exists():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_suffix(destination.suffix + ".tmp")
+        temporary.write_bytes(data)
+        os.replace(temporary, destination)
+    return relative.as_posix()
+
+
 def write_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> tuple[int, str]:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -377,6 +399,205 @@ def iter_mind2web(
         if split_rows != expected_rows:
             raise RuntimeError(
                 f"{split} contains {split_rows:,} rows; expected {expected_rows:,}"
+            )
+
+
+def full_page_tile_layout(
+    width: int,
+    height: int,
+    *,
+    tile_size: int,
+    patch_size: int,
+) -> list[dict[str, Any]]:
+    if width <= 0 or height <= 0:
+        raise ValueError("full-page image dimensions must be positive")
+    if tile_size <= 0 or tile_size > 980:
+        raise ValueError("tile_size must be in [1, 980]")
+    if patch_size <= 0:
+        raise ValueError("patch_size must be positive")
+    layout: list[dict[str, Any]] = []
+    index = 0
+    for top in range(0, height, tile_size):
+        for left in range(0, width, tile_size):
+            right = min(left + tile_size, width)
+            bottom = min(top + tile_size, height)
+            tile_width = right - left
+            tile_height = bottom - top
+            grid_width = math.ceil(tile_width / patch_size)
+            grid_height = math.ceil(tile_height / patch_size)
+            layout.append(
+                {
+                    "index": index,
+                    "box_xyxy": [left, top, right, bottom],
+                    "grid_width": grid_width,
+                    "grid_height": grid_height,
+                    "patch_tokens": grid_width * grid_height,
+                }
+            )
+            index += 1
+    return layout
+
+
+def full_page_prompt(
+    instruction: str,
+    *,
+    width: int,
+    height: int,
+    tile_count: int,
+) -> str:
+    return (
+        f"The following {tile_count} images are non-overlapping tiles from one "
+        f"{width}x{height} webpage screenshot, ordered left-to-right and then "
+        "top-to-bottom. Treat them as one complete page. "
+        f"{instruction} Return the action and bounding box with coordinates "
+        "normalized to the complete original screenshot in [0,1000]."
+    )
+
+
+def iter_mind2web_fullpage(
+    root: Path,
+    raw_root: Path,
+    counters: Counter[str],
+    *,
+    tokenizer: Any,
+    tile_size: int,
+    patch_size: int,
+    max_new_tokens: int,
+    min_total_tokens: int,
+    max_total_tokens: int,
+) -> Iterator[dict[str, Any]]:
+    columns = [
+        "action_uid",
+        "operation",
+        "pos_candidates",
+        "website",
+        "annotation_id",
+        "confirmed_task",
+        "action_reprs",
+        "target_action_index",
+        "target_action_reprs",
+        "screenshot",
+    ]
+    for split, expected_rows in MIND2WEB_TEST_ROWS.items():
+        split_rows = 0
+        for path in parquet_files(raw_root / "data", f"{split}-*.parquet"):
+            parquet = pq.ParquetFile(path)
+            for row_group in range(parquet.num_row_groups):
+                rows = parquet.read_row_group(
+                    row_group, columns=columns
+                ).to_pylist()
+                split_rows += len(rows)
+                for row in rows:
+                    counters["mind2web_fullpage_raw"] += 1
+                    try:
+                        metadata = mind2web_metadata(row)
+                        raw_image = image_bytes(row["screenshot"])
+                        with Image.open(io.BytesIO(raw_image)) as source:
+                            source.load()
+                            width, height = source.size
+                        target_bbox = normalize_bbox(
+                            metadata["bbox"], width, height
+                        )
+                        layout = full_page_tile_layout(
+                            width,
+                            height,
+                            tile_size=tile_size,
+                            patch_size=patch_size,
+                        )
+                        prompt = full_page_prompt(
+                            metadata["prompts"][TARGET_GROUNDING],
+                            width=width,
+                            height=height,
+                            tile_count=len(layout),
+                        )
+                        prompt_tokens = (
+                            len(
+                                tokenizer.encode(
+                                    prompt, add_special_tokens=False
+                                )
+                            )
+                            + 2
+                        )
+                        patch_tokens = sum(
+                            int(tile["patch_tokens"]) for tile in layout
+                        )
+                        image_tokens = patch_tokens + 2 * len(layout)
+                        total_tokens = (
+                            image_tokens
+                            + prompt_tokens
+                            + max_new_tokens
+                        )
+                        if total_tokens <= min_total_tokens:
+                            counters[
+                                "mind2web_fullpage_filtered:at_or_below_min"
+                            ] += 1
+                            continue
+                        if total_tokens > max_total_tokens:
+                            counters[
+                                "mind2web_fullpage_filtered:above_max"
+                            ] += 1
+                            continue
+                        image_path = write_source_image_once(
+                            root,
+                            f"mind2web_fullpage/{split}",
+                            raw_image,
+                        )
+                        counters["mind2web_fullpage_valid"] += 1
+                        yield {
+                            "sample_id": (
+                                f"mind2web_fullpage:{split}:"
+                                f"{metadata['action_uid']}"
+                            ),
+                            "benchmark": "mind2web_fullpage",
+                            "split": split,
+                            "image": image_path,
+                            "image_width": width,
+                            "image_height": height,
+                            "input_protocol": "full_page_tiles",
+                            "prompt": prompt,
+                            "target_action": metadata["action"],
+                            "target_bbox_1000": target_bbox,
+                            "target_value": metadata["value"],
+                            "sequence_tokens": {
+                                "image": image_tokens,
+                                "patches": patch_tokens,
+                                "prompt": prompt_tokens,
+                                "generation": max_new_tokens,
+                                "total": total_tokens,
+                            },
+                            "tile_layout": layout,
+                            "provenance": {
+                                "repo": MIND2WEB_REPO,
+                                "revision": MIND2WEB_REVISION,
+                                "action_uid": metadata["action_uid"],
+                                "annotation_id": metadata["annotation_id"],
+                                "website": metadata["website"],
+                                "source_operation": metadata["operation"],
+                                "target_action_repr": metadata[
+                                    "target_action_repr"
+                                ],
+                                "target_description": metadata[
+                                    "target_description"
+                                ],
+                                "target_role": metadata["target_role"],
+                                "source_bbox_xyxy": metadata["bbox"],
+                                "source_image_sha256": sha256_bytes(raw_image),
+                                "preprocessing": (
+                                    "original screenshot bytes; deterministic "
+                                    "non-overlapping row-major tiles; no crop, "
+                                    "resize, OCR realignment, or re-encoding"
+                                ),
+                            },
+                        }
+                    except Exception as exc:
+                        counters[
+                            "mind2web_fullpage_rejected:"
+                            f"{type(exc).__name__}"
+                        ] += 1
+        if split_rows != expected_rows:
+            raise RuntimeError(
+                f"{split} contains {split_rows:,} rows; "
+                f"expected {expected_rows:,}"
             )
 
 
@@ -673,6 +894,85 @@ def build_sources(
     return manifest
 
 
+def build_fullpage_mind2web(
+    root: Path,
+    *,
+    raw_root: Path,
+    tokenizer_path: Path,
+    tile_size: int,
+    patch_size: int,
+    max_new_tokens: int,
+    min_total_tokens: int,
+    max_total_tokens: int,
+    force: bool,
+) -> dict[str, Any]:
+    from transformers import AutoTokenizer
+
+    if min_total_tokens < 0 or max_total_tokens <= min_total_tokens:
+        raise ValueError("token bounds must satisfy 0 <= min < max")
+    prepare_output(root, force)
+    tokenizer = AutoTokenizer.from_pretrained(
+        str(tokenizer_path), use_fast=True, trust_remote_code=False
+    )
+    counters: Counter[str] = Counter()
+    path = root / "samples" / "mind2web_fullpage.jsonl"
+    count, digest = write_jsonl(
+        path,
+        iter_mind2web_fullpage(
+            root,
+            raw_root,
+            counters,
+            tokenizer=tokenizer,
+            tile_size=tile_size,
+            patch_size=patch_size,
+            max_new_tokens=max_new_tokens,
+            min_total_tokens=min_total_tokens,
+            max_total_tokens=max_total_tokens,
+        ),
+    )
+    manifest = {
+        "paper": PAPER_URL,
+        "exact_paper_reproduction": False,
+        "protocol_notes": [
+            "This is a long-context diagnostic, not the paper's cropped Mind2Web protocol.",
+            "Every screenshot is stored from the pinned official source bytes without crop, resize, OCR realignment, or re-encoding.",
+            "Only samples whose exact image+prompt+generation length is greater than the lower bound and at most the upper bound are included.",
+        ],
+        "sources": {
+            "mind2web": {
+                "repo": MIND2WEB_REPO,
+                "revision": MIND2WEB_REVISION,
+                "license": "OpenRAIL",
+            }
+        },
+        "benchmarks": {
+            "mind2web_fullpage": {
+                "path": path.relative_to(root).as_posix(),
+                "rows": count,
+                "sha256": digest,
+                "prompt_protocol": TARGET_GROUNDING,
+                "input_protocol": "full_page_tiles",
+                "paper_comparison_eligible": False,
+            }
+        },
+        "counters": dict(sorted(counters.items())),
+        "full_page": {
+            "tile_size": tile_size,
+            "patch_size": patch_size,
+            "max_new_tokens": max_new_tokens,
+            "min_total_tokens_exclusive": min_total_tokens,
+            "max_total_tokens_inclusive": max_total_tokens,
+            "tokenizer": str(tokenizer_path.resolve()),
+        },
+    }
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return manifest
+
+
 def validate(root: Path) -> dict[str, Any]:
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     sample_ids: set[str] = set()
@@ -760,6 +1060,20 @@ def parse_args() -> argparse.Namespace:
     all_parser.add_argument("--visualwebarena-jsonl", type=Path)
     all_parser.add_argument("--force", action="store_true")
 
+    fullpage = subparsers.add_parser(
+        "build-fullpage",
+        help="build the uncompressed 16K-64K Mind2Web diagnostic",
+    )
+    add_common_root(fullpage)
+    fullpage.add_argument("--raw-root", type=Path)
+    fullpage.add_argument("--tokenizer", type=Path, required=True)
+    fullpage.add_argument("--tile-size", type=int, default=980)
+    fullpage.add_argument("--patch-size", type=int, default=14)
+    fullpage.add_argument("--max-new-tokens", type=int, default=64)
+    fullpage.add_argument("--min-total-tokens", type=int, default=16_384)
+    fullpage.add_argument("--max-total-tokens", type=int, default=65_536)
+    fullpage.add_argument("--force", action="store_true")
+
     validate_parser = subparsers.add_parser("validate", help="validate prepared data")
     add_common_root(validate_parser)
     return parser.parse_args()
@@ -775,6 +1089,24 @@ def main() -> None:
             root,
             crop_size=args.mind2web_crop_size,
             visualwebarena_jsonl=args.visualwebarena_jsonl,
+            force=args.force,
+        )
+        log(json.dumps(manifest["benchmarks"], indent=2, sort_keys=True))
+    if args.command == "build-fullpage":
+        raw_root = (
+            args.raw_root.expanduser().resolve()
+            if args.raw_root
+            else root / "raw" / "mind2web"
+        )
+        manifest = build_fullpage_mind2web(
+            root,
+            raw_root=raw_root,
+            tokenizer_path=args.tokenizer.expanduser().resolve(),
+            tile_size=args.tile_size,
+            patch_size=args.patch_size,
+            max_new_tokens=args.max_new_tokens,
+            min_total_tokens=args.min_total_tokens,
+            max_total_tokens=args.max_total_tokens,
             force=args.force,
         )
         log(json.dumps(manifest["benchmarks"], indent=2, sort_keys=True))

@@ -132,6 +132,36 @@ sbatch scripts/slurm/eval_gui_grounding_benchmarks.sbatch
 Do not reuse predictions produced before changing a prompt protocol: shards
 are append-only and resume by sample ID.
 
+## Full-page 16K–64K long-context diagnostic
+
+The ordinary `mind2web` benchmark above is target-preserving cropped data and
+does not test long context. Build the separate full-page set from the pinned
+official parquet files:
+
+```bash
+python scripts/data/prepare_gui_grounding_benchmarks.py build-fullpage \
+  --root /home/ma-user/work/LLaDA-o/data/mind2web-fullpage-16k-64k \
+  --raw-root /path/to/pinned/mind2web/raw \
+  --tokenizer /home/ma-user/work/LLaDA-o/models/lladao-gui-d2f-vllm-step1377-exact \
+  --min-total-tokens 16384 \
+  --max-total-tokens 65536
+
+python scripts/data/prepare_gui_grounding_benchmarks.py validate \
+  --root /home/ma-user/work/LLaDA-o/data/mind2web-fullpage-16k-64k
+```
+
+This diagnostic stores the original screenshot bytes without crop, resize,
+OCR realignment, or re-encoding. Exact sequence length includes all padded
+14-pixel image patches, two boundary tokens per 980-pixel tile, the tokenized
+prompt, and 64 generation tokens. Samples at or below 16,384 or above 65,536
+tokens are excluded and counted in the manifest.
+
+The protocol is intentionally marked as not paper-comparable: a prompt tells
+the model that the images are row-major pieces of one page and asks for
+coordinates normalized to the original full screenshot. Score outputs include
+the usual grounding metrics plus 16–32K, 32–48K, and 48–64K subgroups,
+throughput, phase latency, active KV, and peak CUDA memory.
+
 Results are written to:
 
 ```text
