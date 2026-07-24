@@ -224,10 +224,15 @@ def main() -> None:
     root = args.benchmark_root.expanduser().resolve()
     manifest = json.loads((root / "manifest.json").read_text())
     targets = load_targets(root, manifest, args.benchmark, args.limit)
-    predictions = load_predictions(
+    source_predictions = load_predictions(
         args.predictions_dir.expanduser().resolve(),
         args.benchmark,
     )
+    predictions = {
+        sample_id: source_predictions[sample_id]
+        for sample_id in targets
+        if sample_id in source_predictions
+    }
     unexpected = set(predictions) - set(targets)
     missing = set(targets) - set(predictions)
     if unexpected or missing:
@@ -324,6 +329,7 @@ def main() -> None:
                     args.predictions_dir.expanduser().resolve()
                 ),
                 "samples": count,
+                "source_predictions": len(source_predictions),
                 "accepted": accepted,
                 "minimum_confidence": args.minimum_confidence,
                 "minimum_similarity": args.minimum_similarity,
