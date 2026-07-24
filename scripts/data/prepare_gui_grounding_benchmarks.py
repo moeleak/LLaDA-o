@@ -555,6 +555,9 @@ def iter_mind2web_fullpage(
                             "image_height": height,
                             "input_protocol": "full_page_tiles",
                             "prompt": prompt,
+                            "native_prompt": metadata["prompts"][
+                                TARGET_GROUNDING
+                            ],
                             "target_action": metadata["action"],
                             "target_bbox_1000": target_bbox,
                             "target_value": metadata["value"],

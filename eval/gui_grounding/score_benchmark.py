@@ -151,8 +151,17 @@ def runtime_metrics(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
     throughput = []
     for row in records:
         elapsed = row.get("model_elapsed_seconds")
-        sequence = row.get("sequence_tokens") or {}
-        total = sequence.get("total")
+        total = row.get("runtime_sequence_tokens")
+        if not isinstance(total, (int, float)):
+            dense_prefix = row.get("dense_prefix_tokens")
+            generated = row.get("generated_tokens")
+            if isinstance(dense_prefix, (int, float)) and isinstance(
+                generated, (int, float)
+            ):
+                total = dense_prefix + generated
+        if not isinstance(total, (int, float)):
+            sequence = row.get("sequence_tokens") or {}
+            total = sequence.get("total")
         if (
             isinstance(elapsed, (int, float))
             and elapsed > 0

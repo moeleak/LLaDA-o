@@ -165,6 +165,12 @@ visual prefix. It is an explicit extrapolation protocol rather than the
 checkpoint's native packing. Disable KV compression for that A/B so the
 complete dense prefix remains resident during decoding.
 
+The deployable comparison uses a different 16K baseline: the same original
+full-page screenshot is passed through LLaDA-o's checkpoint-native
+single-image resize and native position packing, while the YaRN 128K arm keeps
+the unresized full-page tiles and sequential positions. Do not report an
+unscaled RoPE run above 16K as the original 16K baseline.
+
 The protocol is intentionally marked as not paper-comparable: a prompt tells
 the model that the images are row-major pieces of one page and asks for
 coordinates normalized to the original full screenshot. Score outputs include

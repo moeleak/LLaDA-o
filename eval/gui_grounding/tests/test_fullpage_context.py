@@ -4,7 +4,11 @@ from pathlib import Path
 
 from PIL import Image
 
-from eval.gui_grounding.compare_long_context import validate_true_long_rope
+from eval.gui_grounding.compare_long_context import (
+    validate_original_16k,
+    validate_true_long_rope,
+    validate_yarn_128k_config,
+)
 from eval.gui_grounding.score_benchmark import context_bucket, runtime_metrics
 from scripts.data.prepare_gui_grounding_benchmarks import (
     full_page_prompt,
@@ -106,6 +110,21 @@ class FullPageContextTest(unittest.TestCase):
         self.assertEqual(metrics["max_generation_position"]["max"], 29_999)
         self.assertEqual(metrics["errors"], 1)
 
+    def test_runtime_throughput_uses_actual_resized_tokens(self) -> None:
+        metrics = runtime_metrics(
+            [
+                {
+                    "model_elapsed_seconds": 2.0,
+                    "sequence_tokens": {"total": 40_000},
+                    "runtime_sequence_tokens": 5_000,
+                }
+            ]
+        )
+        self.assertEqual(
+            metrics["total_tokens_per_second"]["mean"],
+            2_500,
+        )
+
     def test_true_long_rope_validation_requires_dense_sequential_prefix(self) -> None:
         rows = [
             {
@@ -135,6 +154,52 @@ class FullPageContextTest(unittest.TestCase):
                 "unscaled",
                 [{**rows[0], "position_mode": "native"}],
                 original_max_position=16_384,
+            )
+
+    def test_original_16k_validation_requires_native_resize(self) -> None:
+        config = {
+            "max_model_len": 16_384,
+            "kv_cache_capacity": 16_384,
+            "rope_scaling": "none",
+            "full_page_tiles": False,
+            "full_page_position_mode": "native",
+            "kv_cache_compression": False,
+        }
+        row = {
+            "position_mode": "native",
+            "runtime_input_protocol": "native_resize",
+            "max_generation_position": 80,
+            "dense_prefix_tokens": 4_950,
+            "cached_prefix_tokens": 4_950,
+            "generated_tokens": 64,
+        }
+        validation = validate_original_16k(
+            [row],
+            config,
+            original_max_position=16_384,
+        )
+        self.assertEqual(validation["max_runtime_tokens"], 5_014)
+
+        with self.assertRaisesRegex(RuntimeError, "native positions"):
+            validate_original_16k(
+                [{**row, "runtime_input_protocol": "full_page_tiles"}],
+                config,
+                original_max_position=16_384,
+            )
+
+    def test_yarn_validation_rejects_an_unscaled_run(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "YaRN 128K"):
+            validate_yarn_128k_config(
+                {
+                    "max_model_len": 131_072,
+                    "kv_cache_capacity": 65_536,
+                    "rope_scaling": "none",
+                    "rope_factor": 8.0,
+                    "original_max_position_embeddings": 16_384,
+                    "full_page_tiles": True,
+                    "full_page_position_mode": "sequential",
+                    "kv_cache_compression": False,
+                }
             )
 
 

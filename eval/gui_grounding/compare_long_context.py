@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare unscaled and YaRN D2F runs on the full-page Mind2Web set."""
+"""Compare the deployable original-16K and YaRN-128K GUI runtimes."""
 
 from __future__ import annotations
 
@@ -22,18 +22,25 @@ from eval.gui_grounding.score_benchmark import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--benchmark-root", type=Path, required=True)
-    parser.add_argument("--unscaled-dir", type=Path, required=True)
+    baseline = parser.add_mutually_exclusive_group(required=True)
+    baseline.add_argument("--original-dir", type=Path)
+    baseline.add_argument(
+        "--unscaled-dir",
+        dest="original_dir",
+        type=Path,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--yarn-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--benchmark", default="mind2web_fullpage")
     parser.add_argument("--original-max-model-len", type=int, default=16_384)
     parser.add_argument(
-        "--require-true-long-rope",
+        "--require-original-vs-yarn",
         action=argparse.BooleanOptionalAction,
         default=False,
         help=(
-            "require sequential visual positions above the original limit "
-            "and an uncompressed dense KV prefix"
+            "require a native-resized original 16K arm and a sequential, "
+            "uncompressed YaRN arm above the original position limit"
         ),
     )
     return parser.parse_args()
@@ -46,6 +53,32 @@ def evaluate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def load_run_config(directory: Path) -> dict[str, Any]:
+    paths = sorted(directory.glob("run-config-rank-*.json"))
+    if not paths:
+        raise FileNotFoundError(f"no run config below {directory}")
+    configs = [json.loads(path.read_text()) for path in paths]
+    keys = (
+        "max_model_len",
+        "kv_cache_capacity",
+        "rope_scaling",
+        "rope_factor",
+        "original_max_position_embeddings",
+        "full_page_tiles",
+        "full_page_position_mode",
+        "kv_cache_compression",
+    )
+    reference = {key: configs[0].get(key) for key in keys}
+    for path, config in zip(paths[1:], configs[1:]):
+        actual = {key: config.get(key) for key in keys}
+        if actual != reference:
+            raise RuntimeError(
+                f"inconsistent run protocol in {path}: "
+                f"{actual} != {reference}"
+            )
+    return reference
+
+
 def percent_delta(before: float | None, after: float | None) -> float | None:
     if before is None or after is None or before == 0:
         return None
@@ -54,61 +87,134 @@ def percent_delta(before: float | None, after: float | None) -> float | None:
 
 def comparison_row(
     name: str,
-    unscaled: dict[str, Any],
+    original: dict[str, Any],
     yarn: dict[str, Any],
 ) -> dict[str, Any]:
-    unscaled_quality = unscaled["quality"]
+    original_quality = original["quality"]
     yarn_quality = yarn["quality"]
-    unscaled_runtime = unscaled["runtime"]
+    original_runtime = original["runtime"]
     yarn_runtime = yarn["runtime"]
-    latency_before = unscaled_quality["latency_seconds"]["mean"]
+    latency_before = original_quality["latency_seconds"]["mean"]
     latency_after = yarn_quality["latency_seconds"]["mean"]
-    throughput_before = unscaled_runtime["total_tokens_per_second"]["mean"]
+    throughput_before = original_runtime["total_tokens_per_second"]["mean"]
     throughput_after = yarn_runtime["total_tokens_per_second"]["mean"]
-    memory_before = unscaled_runtime["peak_memory_allocated_gib"]["mean"]
+    memory_before = original_runtime["peak_memory_allocated_gib"]["mean"]
     memory_after = yarn_runtime["peak_memory_allocated_gib"]["mean"]
-    unscaled_max_position = unscaled_runtime["max_generation_position"]["max"]
+    original_max_position = original_runtime["max_generation_position"]["max"]
     yarn_max_position = yarn_runtime["max_generation_position"]["max"]
     return {
         "bucket": name,
         "samples": yarn_quality["num_samples"],
-        "unscaled_ssr_pct": 100.0 * unscaled_quality["ssr_point_only"],
+        "original_16k_ssr_pct": 100.0 * original_quality["ssr_point_only"],
         "yarn_ssr_pct": 100.0 * yarn_quality["ssr_point_only"],
         "ssr_delta_pp": 100.0
         * (
             yarn_quality["ssr_point_only"]
-            - unscaled_quality["ssr_point_only"]
+            - original_quality["ssr_point_only"]
         ),
-        "unscaled_action_f1_pct": 100.0
-        * unscaled_quality["action_f1_macro_present"],
+        "original_16k_action_f1_pct": 100.0
+        * original_quality["action_f1_macro_present"],
         "yarn_action_f1_pct": 100.0
         * yarn_quality["action_f1_macro_present"],
         "action_f1_delta_pp": 100.0
         * (
             yarn_quality["action_f1_macro_present"]
-            - unscaled_quality["action_f1_macro_present"]
+            - original_quality["action_f1_macro_present"]
         ),
-        "unscaled_parse_rate_pct": 100.0 * unscaled_quality["parse_rate"],
+        "original_16k_parse_rate_pct": 100.0
+        * original_quality["parse_rate"],
         "yarn_parse_rate_pct": 100.0 * yarn_quality["parse_rate"],
-        "unscaled_latency_s": latency_before,
+        "original_16k_latency_s": latency_before,
         "yarn_latency_s": latency_after,
         "latency_delta_pct": percent_delta(latency_before, latency_after),
-        "unscaled_tokens_per_s": throughput_before,
+        "original_16k_tokens_per_s": throughput_before,
         "yarn_tokens_per_s": throughput_after,
         "throughput_delta_pct": percent_delta(
             throughput_before, throughput_after
         ),
-        "unscaled_peak_allocated_gib": memory_before,
+        "original_16k_peak_allocated_gib": memory_before,
         "yarn_peak_allocated_gib": memory_after,
         "peak_allocated_delta_gib": (
             None
             if memory_before is None or memory_after is None
             else memory_after - memory_before
         ),
-        "unscaled_max_generation_position": unscaled_max_position,
+        "original_16k_max_generation_position": original_max_position,
         "yarn_max_generation_position": yarn_max_position,
-        "unscaled_errors": unscaled_runtime["errors"],
+        "original_16k_errors": original_runtime["errors"],
         "yarn_errors": yarn_runtime["errors"],
+    }
+
+
+def validate_original_16k(
+    rows: list[dict[str, Any]],
+    config: dict[str, Any],
+    *,
+    original_max_position: int,
+) -> dict[str, Any]:
+    expected_config = {
+        "max_model_len": original_max_position,
+        "kv_cache_capacity": original_max_position,
+        "rope_scaling": "none",
+        "full_page_tiles": False,
+        "full_page_position_mode": "native",
+        "kv_cache_compression": False,
+    }
+    mismatches = {
+        key: {"expected": value, "actual": config.get(key)}
+        for key, value in expected_config.items()
+        if config.get(key) != value
+    }
+    if mismatches:
+        raise RuntimeError(f"original 16K run config mismatch: {mismatches}")
+    modes = sorted({str(row.get("position_mode")) for row in rows})
+    protocols = sorted(
+        {str(row.get("runtime_input_protocol")) for row in rows}
+    )
+    if modes != ["native"] or protocols != ["native_resize"]:
+        raise RuntimeError(
+            "original 16K predictions must use native positions and native "
+            f"resize: modes={modes}, protocols={protocols}"
+        )
+    positions = [row.get("max_generation_position") for row in rows]
+    dense_lengths = [row.get("dense_prefix_tokens") for row in rows]
+    cached_lengths = [row.get("cached_prefix_tokens") for row in rows]
+    generated = [row.get("generated_tokens") for row in rows]
+    if any(not isinstance(value, int) for value in positions):
+        raise RuntimeError("original 16K run is missing generation positions")
+    if any(not isinstance(value, int) for value in dense_lengths + cached_lengths):
+        raise RuntimeError("original 16K run is missing KV prefix lengths")
+    if any(not isinstance(value, int) for value in generated):
+        raise RuntimeError("original 16K run is missing generation lengths")
+    if any(value >= original_max_position for value in positions):
+        raise RuntimeError("original 16K run exceeded its position limit")
+    if any(
+        dense + output > original_max_position
+        for dense, output in zip(dense_lengths, generated)
+    ):
+        raise RuntimeError("original 16K run exceeded its token capacity")
+    compressed = sum(
+        dense != cached
+        for dense, cached in zip(dense_lengths, cached_lengths)
+    )
+    if compressed:
+        raise RuntimeError(
+            f"original 16K run has {compressed}/{len(rows)} compressed prefixes"
+        )
+    return {
+        "position_mode": "native",
+        "input_protocol": "native_resize",
+        "samples": len(rows),
+        "min_runtime_tokens": min(
+            dense + output
+            for dense, output in zip(dense_lengths, generated)
+        ),
+        "max_runtime_tokens": max(
+            dense + output
+            for dense, output in zip(dense_lengths, generated)
+        ),
+        "max_generation_position": max(positions),
+        "compressed_prefixes": compressed,
     }
 
 
@@ -157,6 +263,26 @@ def validate_true_long_rope(
     }
 
 
+def validate_yarn_128k_config(config: dict[str, Any]) -> None:
+    expected = {
+        "max_model_len": 131_072,
+        "kv_cache_capacity": 65_536,
+        "rope_scaling": "yarn",
+        "rope_factor": 8.0,
+        "original_max_position_embeddings": 16_384,
+        "full_page_tiles": True,
+        "full_page_position_mode": "sequential",
+        "kv_cache_compression": False,
+    }
+    mismatches = {
+        key: {"expected": value, "actual": config.get(key)}
+        for key, value in expected.items()
+        if config.get(key) != value
+    }
+    if mismatches:
+        raise RuntimeError(f"YaRN 128K run config mismatch: {mismatches}")
+
+
 def main() -> None:
     args = parse_args()
     root = args.benchmark_root.expanduser().resolve()
@@ -165,12 +291,11 @@ def main() -> None:
     runs: dict[str, list[dict[str, Any]]] = {}
     protocol_validation: dict[str, Any] = {}
     for name, directory in (
-        ("unscaled", args.unscaled_dir),
+        ("original_16k", args.original_dir),
         ("yarn", args.yarn_dir),
     ):
-        predictions = load_predictions(
-            directory.expanduser().resolve(), args.benchmark
-        )
+        resolved_directory = directory.expanduser().resolve()
+        predictions = load_predictions(resolved_directory, args.benchmark)
         missing = sorted(set(targets) - set(predictions))
         unexpected = sorted(set(predictions) - set(targets))
         if missing or unexpected:
@@ -179,12 +304,21 @@ def main() -> None:
                 f"unexpected={len(unexpected)}"
             )
         runs[name] = joined_records(targets, predictions)
-        if args.require_true_long_rope:
-            protocol_validation[name] = validate_true_long_rope(
-                name,
-                runs[name],
-                original_max_position=args.original_max_model_len,
-            )
+        if args.require_original_vs_yarn:
+            config = load_run_config(resolved_directory)
+            if name == "original_16k":
+                protocol_validation[name] = validate_original_16k(
+                    runs[name],
+                    config,
+                    original_max_position=args.original_max_model_len,
+                )
+            else:
+                validate_yarn_128k_config(config)
+                protocol_validation[name] = validate_true_long_rope(
+                    name,
+                    runs[name],
+                    original_max_position=args.original_max_model_len,
+                )
 
     rows: list[dict[str, Any]] = []
     detailed: dict[str, Any] = {}
@@ -201,15 +335,15 @@ def main() -> None:
                     if context_bucket(row) == bucket
                 ]
             )
-        unscaled_metrics = evaluate(selected["unscaled"])
+        original_metrics = evaluate(selected["original_16k"])
         yarn_metrics = evaluate(selected["yarn"])
         detailed[bucket] = {
-            "unscaled": unscaled_metrics,
+            "original_16k": original_metrics,
             "yarn": yarn_metrics,
         }
         rows.append(
             comparison_row(
-                bucket, unscaled_metrics, yarn_metrics
+                bucket, original_metrics, yarn_metrics
             )
         )
 
@@ -221,12 +355,12 @@ def main() -> None:
     payload = {
         "benchmark": args.benchmark,
         "manifest": str((root / "manifest.json").resolve()),
-        "original_16k_capacity": {
-            "accepted": len(targets) - original_rejections,
-            "rejected": original_rejections,
+        "uncompressed_source_vs_original_16k_capacity": {
+            "at_or_below": len(targets) - original_rejections,
+            "above": original_rejections,
             "total": len(targets),
         },
-        "true_long_rope_validation": protocol_validation,
+        "protocol_validation": protocol_validation,
         "comparison": detailed,
         "table": rows,
     }
@@ -243,33 +377,35 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(rows)
     markdown = [
-        "# LLaDA-o D2F 16K–64K full-page comparison",
+        "# LLaDA-o D2F original 16K vs YaRN 128K",
         "",
         (
-            f"Original 16K capacity rejected {original_rejections}/"
-            f"{len(targets)} prepared samples."
+            f"All {original_rejections}/{len(targets)} source sequences above "
+            "16K were evaluated by the original arm using checkpoint-native "
+            "single-image resize."
         ),
         (
             "Maximum generation RoPE position: "
-            f"unscaled={rows[0]['unscaled_max_generation_position']}, "
+            "original16K="
+            f"{rows[0]['original_16k_max_generation_position']}, "
             f"YaRN={rows[0]['yarn_max_generation_position']}."
         ),
         (
-            "True-long-RoPE protocol validation: "
+            "Original-16K/YaRN-128K protocol validation: "
             f"{'passed' if protocol_validation else 'not requested'}."
         ),
         "",
-        "| Bucket | N | SSR unscaled | SSR YaRN | Δ SSR | "
-        "Latency unscaled | Latency YaRN | Δ latency |",
+        "| Source-length bucket | N | SSR original 16K | SSR YaRN 128K | "
+        "Δ SSR | Latency original 16K | Latency YaRN 128K | Δ latency |",
         "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         markdown.append(
             f"| {row['bucket']} | {row['samples']} | "
-            f"{row['unscaled_ssr_pct']:.2f}% | "
+            f"{row['original_16k_ssr_pct']:.2f}% | "
             f"{row['yarn_ssr_pct']:.2f}% | "
             f"{row['ssr_delta_pp']:+.2f} pp | "
-            f"{row['unscaled_latency_s'] or 0:.3f}s | "
+            f"{row['original_16k_latency_s'] or 0:.3f}s | "
             f"{row['yarn_latency_s'] or 0:.3f}s | "
             f"{row['latency_delta_pct'] or 0:+.2f}% |"
         )
