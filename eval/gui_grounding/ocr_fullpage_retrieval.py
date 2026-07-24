@@ -46,9 +46,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gpu", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--minimum-confidence", type=float, default=0.20)
     parser.add_argument("--minimum-similarity", type=float, default=0.68)
+    parser.add_argument("--model-proximity-weight", type=float, default=0.10)
+    parser.add_argument("--label-control-offset", type=float, default=40.0)
     args = parser.parse_args()
     if args.limit <= 0 or args.limit > 100:
         parser.error("--limit must be in [1, 100]")
+    if not 0.0 <= args.model_proximity_weight <= 1.0:
+        parser.error("--model-proximity-weight must be in [0, 1]")
+    if args.label_control_offset < 0:
+        parser.error("--label-control-offset must be non-negative")
     return args
 
 
@@ -99,6 +105,9 @@ def select_text_match(
     *,
     minimum_confidence: float = 0.20,
     minimum_similarity: float = 0.68,
+    reference_point: tuple[float, float] | None = None,
+    image_size: tuple[int, int] | None = None,
+    proximity_weight: float = 0.0,
 ) -> tuple[OcrDetection | None, float]:
     candidates: list[tuple[float, float, float, float, OcrDetection]] = []
     for detection in detections:
@@ -110,12 +119,51 @@ def select_text_match(
         score = 0.90 * similarity + 0.10 * min(
             1.0, max(0.0, detection.confidence)
         )
-        x1, y1, _, _ = detection.bbox_xyxy
+        x1, y1, x2, y2 = detection.bbox_xyxy
+        if reference_point is not None and image_size is not None:
+            diagonal = max(
+                1.0,
+                (image_size[0] ** 2 + image_size[1] ** 2) ** 0.5,
+            )
+            center_x = (x1 + x2) / 2.0
+            center_y = (y1 + y2) / 2.0
+            distance = (
+                (center_x - reference_point[0]) ** 2
+                + (center_y - reference_point[1]) ** 2
+            ) ** 0.5
+            proximity = max(0.0, 1.0 - distance / diagonal)
+            score = (
+                (1.0 - proximity_weight) * score
+                + proximity_weight * proximity
+            )
         candidates.append((score, similarity, -y1, -x1, detection))
     if not candidates:
         return None, 0.0
     score, _, _, _, detection = max(candidates, key=lambda value: value[:4])
     return detection, score
+
+
+def label_points_to_control(action: str, target_text: str) -> bool:
+    normalized = target_text.strip().casefold()
+    return bool(
+        action == "type_in"
+        or normalized.startswith("*")
+        or normalized.startswith("select ")
+        or normalized.startswith("search by ")
+    )
+
+
+def shift_detection(
+    detection: OcrDetection,
+    *,
+    offset_y: float,
+) -> OcrDetection:
+    x1, y1, x2, y2 = detection.bbox_xyxy
+    return OcrDetection(
+        text=detection.text,
+        confidence=detection.confidence,
+        bbox_xyxy=(x1, y1 + offset_y, x2, y2 + offset_y),
+    )
 
 
 def build_reader(args: argparse.Namespace) -> Any:
@@ -193,17 +241,37 @@ def main() -> None:
     started = time.perf_counter()
     for index, (sample_id, sample) in enumerate(targets.items(), 1):
         row = dict(predictions[sample_id])
-        _, target_text, _ = instruction_target(str(sample["prompt"]))
+        action, target_text, _ = instruction_target(str(sample["prompt"]))
         with Image.open(root / sample["image"]) as source:
             image = source.convert("RGB")
             detections = detect_tiles(reader, image, sample)
+        baseline_bbox = row.get("predicted_bbox_1000")
+        reference_point = None
+        if isinstance(baseline_bbox, (list, tuple)) and len(baseline_bbox) == 4:
+            reference_point = (
+                sample["image_width"]
+                * (float(baseline_bbox[0]) + float(baseline_bbox[2]))
+                / 2_000.0,
+                sample["image_height"]
+                * (float(baseline_bbox[1]) + float(baseline_bbox[3]))
+                / 2_000.0,
+            )
         match, score = select_text_match(
             target_text,
             detections,
             minimum_confidence=args.minimum_confidence,
             minimum_similarity=args.minimum_similarity,
+            reference_point=reference_point,
+            image_size=(sample["image_width"], sample["image_height"]),
+            proximity_weight=args.model_proximity_weight,
         )
         if match is not None:
+            raw_match = match
+            if label_points_to_control(action, target_text):
+                match = shift_detection(
+                    match,
+                    offset_y=args.label_control_offset,
+                )
             row["predicted_bbox_1000"] = scale_bbox(
                 match.bbox_xyxy,
                 sample["image_width"],
@@ -217,6 +285,21 @@ def main() -> None:
             "text_score": score,
             "ocr_confidence": match.confidence if match else 0.0,
             "bbox_xyxy": list(match.bbox_xyxy) if match else None,
+            "raw_bbox_xyxy": (
+                list(raw_match.bbox_xyxy)
+                if match is not None
+                else None
+            ),
+            "model_reference_point_xy": (
+                list(reference_point) if reference_point else None
+            ),
+            "model_proximity_weight": args.model_proximity_weight,
+            "label_control_offset": (
+                args.label_control_offset
+                if match is not None
+                and label_points_to_control(action, target_text)
+                else 0.0
+            ),
             "detections": len(detections),
             "uses_ground_truth_location": False,
         }
@@ -244,6 +327,8 @@ def main() -> None:
                 "accepted": accepted,
                 "minimum_confidence": args.minimum_confidence,
                 "minimum_similarity": args.minimum_similarity,
+                "model_proximity_weight": args.model_proximity_weight,
+                "label_control_offset": args.label_control_offset,
                 "uses_prompt_only": True,
                 "uses_ground_truth_location": False,
             },

@@ -3,7 +3,9 @@ import unittest
 from eval.gui_grounding.ocr_fullpage_retrieval import (
     globalize_detection,
     instruction_target,
+    label_points_to_control,
     select_text_match,
+    shift_detection,
 )
 from scripts.data.ocr_target_realignment import OcrDetection
 
@@ -57,6 +59,28 @@ class OcrFullpageRetrievalTest(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertEqual(match.text, "Quick Tools")
         self.assertGreater(score, 0.9)
+
+    def test_model_reference_breaks_duplicate_text_ties(self) -> None:
+        match, _ = select_text_match(
+            "Search",
+            [
+                OcrDetection("Search", 0.9, (10, 10, 50, 30)),
+                OcrDetection("Search", 0.9, (10, 900, 50, 920)),
+            ],
+            reference_point=(30, 910),
+            image_size=(1_000, 1_000),
+            proximity_weight=0.1,
+        )
+        self.assertEqual(match.bbox_xyxy, (10, 900, 50, 920))
+
+    def test_label_offset_moves_text_to_its_control(self) -> None:
+        self.assertTrue(label_points_to_control("type_in", "First Name"))
+        self.assertTrue(label_points_to_control("lclick", "Search By Breed"))
+        shifted = shift_detection(
+            OcrDetection("First Name", 0.9, (10, 20, 50, 40)),
+            offset_y=40,
+        )
+        self.assertEqual(shifted.bbox_xyxy, (10, 60, 50, 80))
 
 
 if __name__ == "__main__":
