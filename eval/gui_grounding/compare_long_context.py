@@ -54,6 +54,15 @@ def parse_args() -> argparse.Namespace:
             "only the original-to-YaRN RoPE configuration change"
         ),
     )
+    protocol.add_argument(
+        "--require-long-yarn-isolation",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "require identical sequential full-page inputs above 16K and "
+            "permit only unscaled-to-YaRN RoPE configuration changes"
+        ),
+    )
     args = parser.parse_args()
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be positive")
@@ -77,6 +86,7 @@ def load_run_config(directory: Path) -> dict[str, Any]:
         "kv_cache_capacity",
         "rope_scaling",
         "rope_factor",
+        "allow_unscaled_max_model_len",
         "original_max_position_embeddings",
         "full_page_tiles",
         "full_page_position_mode",
@@ -340,6 +350,48 @@ def validate_yarn_isolation(
     )
 
 
+def validate_long_yarn_isolation_config(
+    config: dict[str, Any],
+    *,
+    rope_scaling: str,
+) -> None:
+    expected = {
+        "max_model_len": 131_072,
+        "kv_cache_capacity": 65_536,
+        "rope_scaling": rope_scaling,
+        "allow_unscaled_max_model_len": rope_scaling == "none",
+        "original_max_position_embeddings": 16_384,
+        "full_page_tiles": True,
+        "full_page_position_mode": "sequential",
+        "kv_cache_compression": False,
+    }
+    if rope_scaling == "yarn":
+        expected["rope_factor"] = 8.0
+    mismatches = {
+        key: {"expected": value, "actual": config.get(key)}
+        for key, value in expected.items()
+        if config.get(key) != value
+    }
+    if mismatches:
+        raise RuntimeError(
+            f"long YaRN isolation {rope_scaling} config mismatch: "
+            f"{mismatches}"
+        )
+
+
+def rename_baseline_fields(
+    row: dict[str, Any],
+    *,
+    source: str,
+    target: str,
+) -> dict[str, Any]:
+    prefix = source + "_"
+    return {
+        (target + key[len(source) :] if key.startswith(prefix) else key): value
+        for key, value in row.items()
+    }
+
+
 def record_point_hit(row: dict[str, Any]) -> bool:
     predicted = row.get("predicted_bbox_1000")
     target = row.get("target_bbox_1000")
@@ -427,6 +479,12 @@ def main() -> None:
     ):
         resolved_directory = directory.expanduser().resolve()
         predictions = load_predictions(resolved_directory, args.benchmark)
+        if args.limit is not None:
+            predictions = {
+                sample_id: predictions[sample_id]
+                for sample_id in targets
+                if sample_id in predictions
+            }
         missing = sorted(set(targets) - set(predictions))
         unexpected = sorted(set(predictions) - set(targets))
         if missing or unexpected:
@@ -435,9 +493,24 @@ def main() -> None:
                 f"unexpected={len(unexpected)}"
             )
         runs[name] = joined_records(targets, predictions)
-        if args.require_original_vs_yarn or args.require_yarn_isolation:
+        if (
+            args.require_original_vs_yarn
+            or args.require_yarn_isolation
+            or args.require_long_yarn_isolation
+        ):
             config = load_run_config(resolved_directory)
-            if name == "original_16k":
+            if args.require_long_yarn_isolation:
+                rope_scaling = "none" if name == "original_16k" else "yarn"
+                validate_long_yarn_isolation_config(
+                    config,
+                    rope_scaling=rope_scaling,
+                )
+                protocol_validation[name] = validate_true_long_rope(
+                    name,
+                    runs[name],
+                    original_max_position=args.original_max_model_len,
+                )
+            elif name == "original_16k":
                 protocol_validation[name] = validate_original_16k(
                     runs[name],
                     config,
@@ -458,7 +531,7 @@ def main() -> None:
                 )
 
     paired = paired_diagnostics(runs["original_16k"], runs["yarn"])
-    if args.require_yarn_isolation:
+    if args.require_yarn_isolation or args.require_long_yarn_isolation:
         if paired["seed_mismatches"]:
             raise RuntimeError("YaRN isolation has mismatched inference seeds")
         if paired["runtime_token_mismatches"]:
@@ -481,15 +554,23 @@ def main() -> None:
             )
         original_metrics = evaluate(selected["original_16k"])
         yarn_metrics = evaluate(selected["yarn"])
-        detailed[bucket] = {
-            "original_16k": original_metrics,
-            "yarn": yarn_metrics,
-        }
-        rows.append(
-            comparison_row(
-                bucket, original_metrics, yarn_metrics
-            )
+        baseline_name = (
+            "unscaled_128k"
+            if args.require_long_yarn_isolation
+            else "original_16k"
         )
+        detailed[bucket] = {
+            baseline_name: original_metrics,
+            "yarn_128k": yarn_metrics,
+        }
+        row = comparison_row(bucket, original_metrics, yarn_metrics)
+        if args.require_long_yarn_isolation:
+            row = rename_baseline_fields(
+                row,
+                source="original_16k",
+                target="unscaled_128k",
+            )
+        rows.append(row)
 
     original_rejections = sum(
         int((row.get("sequence_tokens") or {}).get("total", 0))
@@ -522,29 +603,50 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(rows)
     isolation = args.require_yarn_isolation
+    long_isolation = args.require_long_yarn_isolation
+    baseline_prefix = "unscaled_128k" if long_isolation else "original_16k"
+    baseline_title = "unscaled 128K" if long_isolation else "original 16K"
     markdown = [
         (
-            "# LLaDA-o D2F 100-sample YaRN isolation"
-            if isolation
-            else "# LLaDA-o D2F original 16K vs YaRN 128K"
+            "# LLaDA-o D2F true-long unscaled 128K vs YaRN 128K"
+            if long_isolation
+            else (
+                "# LLaDA-o D2F 100-sample YaRN isolation"
+                if isolation
+                else "# LLaDA-o D2F original 16K vs YaRN 128K"
+            )
         ),
         "",
         (
-            f"All {original_rejections}/{len(targets)} source sequences above "
-            "16K were evaluated by the original arm using checkpoint-native "
-            "single-image resize."
+            f"All {original_rejections}/{len(targets)} source sequences "
+            "exceed the original 16K capacity."
+            if long_isolation
+            else (
+                f"All {original_rejections}/{len(targets)} source sequences "
+                "above 16K were evaluated by the original arm using "
+                "checkpoint-native single-image resize."
+            )
         ),
         (
-            "Controlled variables: identical native-resized image, native "
-            "positions, prompt, seed, decoding, 16K resident KV capacity, and "
-            "no KV compression; only YaRN scaling/max position changes."
-            if isolation
-            else ""
+            (
+                "Controlled variables: identical full-page tiles, sequential "
+                "positions, prompt, seed, decoding, 128K model limit, 65,536 "
+                "resident KV capacity, and no KV compression; only RoPE "
+                "scaling changes."
+            )
+            if long_isolation
+            else (
+                "Controlled variables: identical native-resized image, native "
+                "positions, prompt, seed, decoding, 16K resident KV capacity, "
+                "and no KV compression; only YaRN scaling/max position changes."
+                if isolation
+                else ""
+            )
         ),
         (
             "Maximum generation RoPE position: "
-            "original16K="
-            f"{rows[0]['original_16k_max_generation_position']}, "
+            f"{baseline_title}="
+            f"{rows[0][baseline_prefix + '_max_generation_position']}, "
             f"YaRN={rows[0]['yarn_max_generation_position']}."
         ),
         (
@@ -560,17 +662,17 @@ def main() -> None:
             f"{paired['yarn_only_hit']}."
         ),
         "",
-        "| Source-length bucket | N | SSR original 16K | SSR YaRN 128K | "
-        "Δ SSR | Latency original 16K | Latency YaRN 128K | Δ latency |",
+        f"| Source-length bucket | N | SSR {baseline_title} | SSR YaRN 128K | "
+        f"Δ SSR | Latency {baseline_title} | Latency YaRN 128K | Δ latency |",
         "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         markdown.append(
             f"| {row['bucket']} | {row['samples']} | "
-            f"{row['original_16k_ssr_pct']:.2f}% | "
+            f"{row[baseline_prefix + '_ssr_pct']:.2f}% | "
             f"{row['yarn_ssr_pct']:.2f}% | "
             f"{row['ssr_delta_pp']:+.2f} pp | "
-            f"{row['original_16k_latency_s'] or 0:.3f}s | "
+            f"{row[baseline_prefix + '_latency_s'] or 0:.3f}s | "
             f"{row['yarn_latency_s'] or 0:.3f}s | "
             f"{row['latency_delta_pct'] or 0:+.2f}% |"
         )

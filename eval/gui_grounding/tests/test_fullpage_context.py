@@ -7,6 +7,7 @@ from PIL import Image
 from eval.gui_grounding.compare_long_context import (
     paired_diagnostics,
     validate_original_16k,
+    validate_long_yarn_isolation_config,
     validate_true_long_rope,
     validate_yarn_128k_config,
     validate_yarn_isolation,
@@ -235,6 +236,43 @@ class FullPageContextTest(unittest.TestCase):
                 [row],
                 {**config, "kv_cache_capacity": 65_536},
                 original_max_position=16_384,
+            )
+
+    def test_long_yarn_isolation_changes_only_rope_scaling(self) -> None:
+        common = {
+            "max_model_len": 131_072,
+            "kv_cache_capacity": 65_536,
+            "rope_factor": 8.0,
+            "original_max_position_embeddings": 16_384,
+            "full_page_tiles": True,
+            "full_page_position_mode": "sequential",
+            "kv_cache_compression": False,
+        }
+        validate_long_yarn_isolation_config(
+            {
+                **common,
+                "rope_scaling": "none",
+                "allow_unscaled_max_model_len": True,
+            },
+            rope_scaling="none",
+        )
+        validate_long_yarn_isolation_config(
+            {
+                **common,
+                "rope_scaling": "yarn",
+                "allow_unscaled_max_model_len": False,
+            },
+            rope_scaling="yarn",
+        )
+        with self.assertRaisesRegex(RuntimeError, "config mismatch"):
+            validate_long_yarn_isolation_config(
+                {
+                    **common,
+                    "rope_scaling": "yarn",
+                    "allow_unscaled_max_model_len": False,
+                    "kv_cache_compression": True,
+                },
+                rope_scaling="yarn",
             )
 
     def test_paired_diagnostics_audits_controlled_variables(self) -> None:
