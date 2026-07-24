@@ -5,9 +5,11 @@ from pathlib import Path
 from PIL import Image
 
 from eval.gui_grounding.compare_long_context import (
+    paired_diagnostics,
     validate_original_16k,
     validate_true_long_rope,
     validate_yarn_128k_config,
+    validate_yarn_isolation,
 )
 from eval.gui_grounding.score_benchmark import context_bucket, runtime_metrics
 from scripts.data.prepare_gui_grounding_benchmarks import (
@@ -201,6 +203,67 @@ class FullPageContextTest(unittest.TestCase):
                     "kv_cache_compression": False,
                 }
             )
+
+    def test_yarn_isolation_requires_native_compressed_input(self) -> None:
+        config = {
+            "max_model_len": 131_072,
+            "kv_cache_capacity": 16_384,
+            "rope_scaling": "yarn",
+            "rope_factor": 8.0,
+            "original_max_position_embeddings": 16_384,
+            "full_page_tiles": False,
+            "full_page_position_mode": "native",
+            "kv_cache_compression": False,
+        }
+        row = {
+            "position_mode": "native",
+            "runtime_input_protocol": "native_resize",
+            "max_generation_position": 80,
+            "dense_prefix_tokens": 4_950,
+            "cached_prefix_tokens": 4_950,
+            "generated_tokens": 64,
+        }
+        validation = validate_yarn_isolation(
+            [row],
+            config,
+            original_max_position=16_384,
+        )
+        self.assertEqual(validation["max_runtime_tokens"], 5_014)
+
+        with self.assertRaisesRegex(RuntimeError, "config mismatch"):
+            validate_yarn_isolation(
+                [row],
+                {**config, "kv_cache_capacity": 65_536},
+                original_max_position=16_384,
+            )
+
+    def test_paired_diagnostics_audits_controlled_variables(self) -> None:
+        common = {
+            "sample_id": "sample",
+            "target_bbox_1000": [0, 0, 100, 100],
+            "predicted_action": "lclick",
+            "inference_seed": 42,
+            "runtime_sequence_tokens": 1_000,
+        }
+        diagnostics = paired_diagnostics(
+            [
+                {
+                    **common,
+                    "prediction": "lclick [0,0,20,20]",
+                    "predicted_bbox_1000": [0, 0, 20, 20],
+                }
+            ],
+            [
+                {
+                    **common,
+                    "prediction": "lclick [200,200,220,220]",
+                    "predicted_bbox_1000": [200, 200, 220, 220],
+                }
+            ],
+        )
+        self.assertEqual(diagnostics["original_only_hit"], 1)
+        self.assertEqual(diagnostics["runtime_token_mismatches"], 0)
+        self.assertEqual(diagnostics["exact_prediction_matches"], 0)
 
 
 if __name__ == "__main__":

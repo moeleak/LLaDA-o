@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from eval.gui_grounding.metrics import score_records
+from eval.gui_grounding.metrics import bbox_center, point_in_box, score_records
 from eval.gui_grounding.score_benchmark import (
     context_bucket,
     joined_records,
@@ -33,8 +33,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--yarn-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--benchmark", default="mind2web_fullpage")
+    parser.add_argument("--limit", type=int)
     parser.add_argument("--original-max-model-len", type=int, default=16_384)
-    parser.add_argument(
+    protocol = parser.add_mutually_exclusive_group()
+    protocol.add_argument(
         "--require-original-vs-yarn",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -43,7 +45,19 @@ def parse_args() -> argparse.Namespace:
             "uncompressed YaRN arm above the original position limit"
         ),
     )
-    return parser.parse_args()
+    protocol.add_argument(
+        "--require-yarn-isolation",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "require identical native-resized inputs below 16K and permit "
+            "only the original-to-YaRN RoPE configuration change"
+        ),
+    )
+    args = parser.parse_args()
+    if args.limit is not None and args.limit <= 0:
+        parser.error("--limit must be positive")
+    return args
 
 
 def evaluate(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -146,6 +160,63 @@ def comparison_row(
     }
 
 
+def validate_native_resized_rows(
+    name: str,
+    rows: list[dict[str, Any]],
+    *,
+    original_max_position: int,
+) -> dict[str, Any]:
+    modes = sorted({str(row.get("position_mode")) for row in rows})
+    protocols = sorted(
+        {str(row.get("runtime_input_protocol")) for row in rows}
+    )
+    if modes != ["native"] or protocols != ["native_resize"]:
+        raise RuntimeError(
+            f"{name} predictions must use native positions and native "
+            f"resize: modes={modes}, protocols={protocols}"
+        )
+    positions = [row.get("max_generation_position") for row in rows]
+    dense_lengths = [row.get("dense_prefix_tokens") for row in rows]
+    cached_lengths = [row.get("cached_prefix_tokens") for row in rows]
+    generated = [row.get("generated_tokens") for row in rows]
+    if any(not isinstance(value, int) for value in positions):
+        raise RuntimeError(f"{name} is missing generation positions")
+    if any(not isinstance(value, int) for value in dense_lengths + cached_lengths):
+        raise RuntimeError(f"{name} is missing KV prefix lengths")
+    if any(not isinstance(value, int) for value in generated):
+        raise RuntimeError(f"{name} is missing generation lengths")
+    if any(value >= original_max_position for value in positions):
+        raise RuntimeError(f"{name} exceeded the original position limit")
+    if any(
+        dense + output > original_max_position
+        for dense, output in zip(dense_lengths, generated)
+    ):
+        raise RuntimeError(f"{name} exceeded the 16K resident token capacity")
+    compressed = sum(
+        dense != cached
+        for dense, cached in zip(dense_lengths, cached_lengths)
+    )
+    if compressed:
+        raise RuntimeError(
+            f"{name} has {compressed}/{len(rows)} compressed prefixes"
+        )
+    return {
+        "position_mode": "native",
+        "input_protocol": "native_resize",
+        "samples": len(rows),
+        "min_runtime_tokens": min(
+            dense + output
+            for dense, output in zip(dense_lengths, generated)
+        ),
+        "max_runtime_tokens": max(
+            dense + output
+            for dense, output in zip(dense_lengths, generated)
+        ),
+        "max_generation_position": max(positions),
+        "compressed_prefixes": compressed,
+    }
+
+
 def validate_original_16k(
     rows: list[dict[str, Any]],
     config: dict[str, Any],
@@ -167,55 +238,11 @@ def validate_original_16k(
     }
     if mismatches:
         raise RuntimeError(f"original 16K run config mismatch: {mismatches}")
-    modes = sorted({str(row.get("position_mode")) for row in rows})
-    protocols = sorted(
-        {str(row.get("runtime_input_protocol")) for row in rows}
+    return validate_native_resized_rows(
+        "original 16K",
+        rows,
+        original_max_position=original_max_position,
     )
-    if modes != ["native"] or protocols != ["native_resize"]:
-        raise RuntimeError(
-            "original 16K predictions must use native positions and native "
-            f"resize: modes={modes}, protocols={protocols}"
-        )
-    positions = [row.get("max_generation_position") for row in rows]
-    dense_lengths = [row.get("dense_prefix_tokens") for row in rows]
-    cached_lengths = [row.get("cached_prefix_tokens") for row in rows]
-    generated = [row.get("generated_tokens") for row in rows]
-    if any(not isinstance(value, int) for value in positions):
-        raise RuntimeError("original 16K run is missing generation positions")
-    if any(not isinstance(value, int) for value in dense_lengths + cached_lengths):
-        raise RuntimeError("original 16K run is missing KV prefix lengths")
-    if any(not isinstance(value, int) for value in generated):
-        raise RuntimeError("original 16K run is missing generation lengths")
-    if any(value >= original_max_position for value in positions):
-        raise RuntimeError("original 16K run exceeded its position limit")
-    if any(
-        dense + output > original_max_position
-        for dense, output in zip(dense_lengths, generated)
-    ):
-        raise RuntimeError("original 16K run exceeded its token capacity")
-    compressed = sum(
-        dense != cached
-        for dense, cached in zip(dense_lengths, cached_lengths)
-    )
-    if compressed:
-        raise RuntimeError(
-            f"original 16K run has {compressed}/{len(rows)} compressed prefixes"
-        )
-    return {
-        "position_mode": "native",
-        "input_protocol": "native_resize",
-        "samples": len(rows),
-        "min_runtime_tokens": min(
-            dense + output
-            for dense, output in zip(dense_lengths, generated)
-        ),
-        "max_runtime_tokens": max(
-            dense + output
-            for dense, output in zip(dense_lengths, generated)
-        ),
-        "max_generation_position": max(positions),
-        "compressed_prefixes": compressed,
-    }
 
 
 def validate_true_long_rope(
@@ -283,11 +310,115 @@ def validate_yarn_128k_config(config: dict[str, Any]) -> None:
         raise RuntimeError(f"YaRN 128K run config mismatch: {mismatches}")
 
 
+def validate_yarn_isolation(
+    rows: list[dict[str, Any]],
+    config: dict[str, Any],
+    *,
+    original_max_position: int,
+) -> dict[str, Any]:
+    expected = {
+        "max_model_len": 131_072,
+        "kv_cache_capacity": original_max_position,
+        "rope_scaling": "yarn",
+        "rope_factor": 8.0,
+        "original_max_position_embeddings": original_max_position,
+        "full_page_tiles": False,
+        "full_page_position_mode": "native",
+        "kv_cache_compression": False,
+    }
+    mismatches = {
+        key: {"expected": value, "actual": config.get(key)}
+        for key, value in expected.items()
+        if config.get(key) != value
+    }
+    if mismatches:
+        raise RuntimeError(f"YaRN isolation run config mismatch: {mismatches}")
+    return validate_native_resized_rows(
+        "YaRN isolation",
+        rows,
+        original_max_position=original_max_position,
+    )
+
+
+def record_point_hit(row: dict[str, Any]) -> bool:
+    predicted = row.get("predicted_bbox_1000")
+    target = row.get("target_bbox_1000")
+    return bool(
+        isinstance(predicted, (list, tuple))
+        and len(predicted) == 4
+        and isinstance(target, (list, tuple))
+        and len(target) == 4
+        and point_in_box(bbox_center(predicted), target)
+    )
+
+
+def paired_diagnostics(
+    original: list[dict[str, Any]],
+    yarn: list[dict[str, Any]],
+) -> dict[str, Any]:
+    original_by_id = {str(row["sample_id"]): row for row in original}
+    yarn_by_id = {str(row["sample_id"]): row for row in yarn}
+    if set(original_by_id) != set(yarn_by_id):
+        raise RuntimeError("paired diagnostic sample IDs do not match")
+    exact_predictions = 0
+    action_matches = 0
+    bbox_matches = 0
+    seed_mismatches = 0
+    runtime_token_mismatches = 0
+    both_hit = 0
+    original_only_hit = 0
+    yarn_only_hit = 0
+    neither_hit = 0
+    for sample_id, baseline in original_by_id.items():
+        scaled = yarn_by_id[sample_id]
+        exact_predictions += baseline.get("prediction") == scaled.get(
+            "prediction"
+        )
+        action_matches += baseline.get("predicted_action") == scaled.get(
+            "predicted_action"
+        )
+        bbox_matches += baseline.get("predicted_bbox_1000") == scaled.get(
+            "predicted_bbox_1000"
+        )
+        seed_mismatches += baseline.get("inference_seed") != scaled.get(
+            "inference_seed"
+        )
+        runtime_token_mismatches += baseline.get(
+            "runtime_sequence_tokens"
+        ) != scaled.get("runtime_sequence_tokens")
+        baseline_hit = record_point_hit(baseline)
+        scaled_hit = record_point_hit(scaled)
+        if baseline_hit and scaled_hit:
+            both_hit += 1
+        elif baseline_hit:
+            original_only_hit += 1
+        elif scaled_hit:
+            yarn_only_hit += 1
+        else:
+            neither_hit += 1
+    samples = len(original_by_id)
+    return {
+        "samples": samples,
+        "exact_prediction_matches": exact_predictions,
+        "exact_prediction_match_rate": exact_predictions / samples,
+        "action_matches": action_matches,
+        "action_match_rate": action_matches / samples,
+        "bbox_matches": bbox_matches,
+        "bbox_match_rate": bbox_matches / samples,
+        "seed_mismatches": seed_mismatches,
+        "runtime_token_mismatches": runtime_token_mismatches,
+        "both_hit": both_hit,
+        "original_only_hit": original_only_hit,
+        "yarn_only_hit": yarn_only_hit,
+        "neither_hit": neither_hit,
+    }
+
+
 def main() -> None:
     args = parse_args()
     root = args.benchmark_root.expanduser().resolve()
     manifest = json.loads((root / "manifest.json").read_text())
-    targets = load_targets(root, manifest, args.benchmark, None)
+    targets = load_targets(root, manifest, args.benchmark, args.limit)
     runs: dict[str, list[dict[str, Any]]] = {}
     protocol_validation: dict[str, Any] = {}
     for name, directory in (
@@ -304,7 +435,7 @@ def main() -> None:
                 f"unexpected={len(unexpected)}"
             )
         runs[name] = joined_records(targets, predictions)
-        if args.require_original_vs_yarn:
+        if args.require_original_vs_yarn or args.require_yarn_isolation:
             config = load_run_config(resolved_directory)
             if name == "original_16k":
                 protocol_validation[name] = validate_original_16k(
@@ -312,13 +443,26 @@ def main() -> None:
                     config,
                     original_max_position=args.original_max_model_len,
                 )
-            else:
+            elif args.require_original_vs_yarn:
                 validate_yarn_128k_config(config)
                 protocol_validation[name] = validate_true_long_rope(
                     name,
                     runs[name],
                     original_max_position=args.original_max_model_len,
                 )
+            else:
+                protocol_validation[name] = validate_yarn_isolation(
+                    runs[name],
+                    config,
+                    original_max_position=args.original_max_model_len,
+                )
+
+    paired = paired_diagnostics(runs["original_16k"], runs["yarn"])
+    if args.require_yarn_isolation:
+        if paired["seed_mismatches"]:
+            raise RuntimeError("YaRN isolation has mismatched inference seeds")
+        if paired["runtime_token_mismatches"]:
+            raise RuntimeError("YaRN isolation has mismatched runtime tokens")
 
     rows: list[dict[str, Any]] = []
     detailed: dict[str, Any] = {}
@@ -361,6 +505,7 @@ def main() -> None:
             "total": len(targets),
         },
         "protocol_validation": protocol_validation,
+        "paired_diagnostics": paired,
         "comparison": detailed,
         "table": rows,
     }
@@ -376,13 +521,25 @@ def main() -> None:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
+    isolation = args.require_yarn_isolation
     markdown = [
-        "# LLaDA-o D2F original 16K vs YaRN 128K",
+        (
+            "# LLaDA-o D2F 100-sample YaRN isolation"
+            if isolation
+            else "# LLaDA-o D2F original 16K vs YaRN 128K"
+        ),
         "",
         (
             f"All {original_rejections}/{len(targets)} source sequences above "
             "16K were evaluated by the original arm using checkpoint-native "
             "single-image resize."
+        ),
+        (
+            "Controlled variables: identical native-resized image, native "
+            "positions, prompt, seed, decoding, 16K resident KV capacity, and "
+            "no KV compression; only YaRN scaling/max position changes."
+            if isolation
+            else ""
         ),
         (
             "Maximum generation RoPE position: "
@@ -391,8 +548,16 @@ def main() -> None:
             f"YaRN={rows[0]['yarn_max_generation_position']}."
         ),
         (
-            "Original-16K/YaRN-128K protocol validation: "
+            "Protocol validation: "
             f"{'passed' if protocol_validation else 'not requested'}."
+        ),
+        (
+            "Paired prediction agreement: "
+            f"{paired['exact_prediction_matches']}/{paired['samples']} "
+            f"({100 * paired['exact_prediction_match_rate']:.2f}%); "
+            "SSR flips original-only="
+            f"{paired['original_only_hit']}, YaRN-only="
+            f"{paired['yarn_only_hit']}."
         ),
         "",
         "| Source-length bucket | N | SSR original 16K | SSR YaRN 128K | "
