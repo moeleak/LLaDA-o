@@ -85,6 +85,18 @@ def instruction_target(prompt: str) -> tuple[str, str, str]:
     raise ValueError(f"unsupported GUI instruction: {instruction!r}")
 
 
+def format_prediction(
+    action: str,
+    bbox_1000: Iterable[Any] | None,
+    value: str,
+) -> str:
+    if bbox_1000 is None:
+        return ""
+    coords = ",".join(str(round(float(item))) for item in bbox_1000)
+    suffix = f" {value}" if value else ""
+    return f"{action} [{coords}]{suffix}"
+
+
 def globalize_detection(
     raw: Iterable[Any],
     tile_box: Iterable[Any],
@@ -246,7 +258,7 @@ def main() -> None:
     started = time.perf_counter()
     for index, (sample_id, sample) in enumerate(targets.items(), 1):
         row = dict(predictions[sample_id])
-        action, target_text, _ = instruction_target(str(sample["prompt"]))
+        action, target_text, value = instruction_target(str(sample["prompt"]))
         with Image.open(root / sample["image"]) as source:
             image = source.convert("RGB")
             detections = detect_tiles(reader, image, sample)
@@ -283,6 +295,16 @@ def main() -> None:
                 sample["image_height"],
             )
             accepted += 1
+        bbox = row.get("predicted_bbox_1000")
+        has_bbox = isinstance(bbox, (list, tuple)) and len(bbox) == 4
+        row["predicted_action"] = action
+        row["predicted_value"] = value
+        row["parse_error"] = None if has_bbox else "no_bbox"
+        row["prediction"] = format_prediction(
+            action,
+            bbox if has_bbox else None,
+            value,
+        )
         row["ocr_retrieval"] = {
             "accepted": match is not None,
             "target_text": target_text,
@@ -336,6 +358,7 @@ def main() -> None:
                 "model_proximity_weight": args.model_proximity_weight,
                 "label_control_offset": args.label_control_offset,
                 "uses_prompt_only": True,
+                "uses_prompt_action": True,
                 "uses_ground_truth_location": False,
             },
             indent=2,

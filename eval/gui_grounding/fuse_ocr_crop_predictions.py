@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from eval.gui_grounding.ocr_fullpage_retrieval import (
+    format_prediction,
     instruction_target,
     label_points_to_control,
     write_jsonl,
@@ -58,18 +59,6 @@ def crop_bbox_to_source(
 
 def prefer_crop_model(action: str, target_text: str) -> bool:
     return action == "lclick" and label_points_to_control(action, target_text)
-
-
-def format_prediction(
-    action: str,
-    bbox_1000: Sequence[int] | None,
-    value: str,
-) -> str:
-    if bbox_1000 is None:
-        return ""
-    coords = ",".join(str(int(item)) for item in bbox_1000)
-    suffix = f" {value}" if value else ""
-    return f"{action} [{coords}]{suffix}"
 
 
 def main() -> None:

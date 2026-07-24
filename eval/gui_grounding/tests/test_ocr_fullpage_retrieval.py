@@ -1,6 +1,7 @@
 import unittest
 
 from eval.gui_grounding.ocr_fullpage_retrieval import (
+    format_prediction,
     globalize_detection,
     instruction_target,
     label_points_to_control,
@@ -46,6 +47,16 @@ class OcrFullpageRetrievalTest(unittest.TestCase):
         self.assertEqual(
             detection.bbox_xyxy,
             (990.0, 1980.0, 1010.0, 2000.0),
+        )
+
+    def test_format_prediction_normalizes_prompt_action(self) -> None:
+        self.assertEqual(
+            format_prediction("lclick", [10.2, 20.8, 30, 40], ""),
+            "lclick [10,21,30,40]",
+        )
+        self.assertEqual(
+            format_prediction("type_in", [1, 2, 3, 4], "hello"),
+            "type_in [1,2,3,4] hello",
         )
 
     def test_text_match_prefers_exact_prompt_target(self) -> None:
