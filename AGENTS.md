@@ -10,3 +10,8 @@
   its advertised maximum position may differ.
 - Do not launch more than 100 benchmark samples unless the user explicitly
   authorizes the larger run.
+- A causal true-long YaRN comparison must keep full-page tiles, sequential
+  positions above 16K, the 128K model limit, 65,536-token resident KV
+  capacity, sample IDs, seed, prompt, and decoding identical. Compare
+  unscaled 128K with YaRN 128K; native-resized original 16K versus full-page
+  YaRN is a deployment comparison, not a controlled YaRN experiment.
