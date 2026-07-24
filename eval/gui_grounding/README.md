@@ -156,11 +156,21 @@ OCR realignment, or re-encoding. Exact sequence length includes all padded
 prompt, and 64 generation tokens. Samples at or below 16,384 or above 65,536
 tokens are excluded and counted in the manifest.
 
+LLaDA-o's native multimodal packing gives all visual tokens from one image a
+shared LLM RoPE position, so a long visual KV sequence does not by itself test
+long RoPE extrapolation. The true-long-position A/B must use
+`--full-page-position-mode sequential`; this assigns every visual token an
+absolute position and places prompt/generation positions after the dense
+visual prefix. It is an explicit extrapolation protocol rather than the
+checkpoint's native packing. Disable KV compression for that A/B so the
+complete dense prefix remains resident during decoding.
+
 The protocol is intentionally marked as not paper-comparable: a prompt tells
 the model that the images are row-major pieces of one page and asks for
 coordinates normalized to the original full screenshot. Score outputs include
 the usual grounding metrics plus 16–32K, 32–48K, and 48–64K subgroups,
-throughput, phase latency, active KV, and peak CUDA memory.
+throughput, phase latency, active KV, peak CUDA memory, and the observed
+maximum prefill/generation RoPE positions.
 
 Results are written to:
 

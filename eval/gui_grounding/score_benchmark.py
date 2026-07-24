@@ -141,6 +141,8 @@ def runtime_metrics(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "peak_memory_allocated_gib",
         "peak_memory_reserved_gib",
         "input_images",
+        "max_prefill_position",
+        "max_generation_position",
     )
     result = {
         field: numeric_summary(row.get(field) for row in records)

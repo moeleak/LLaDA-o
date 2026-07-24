@@ -27,6 +27,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--benchmark", default="mind2web_fullpage")
     parser.add_argument("--original-max-model-len", type=int, default=16_384)
+    parser.add_argument(
+        "--require-true-long-rope",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "require sequential visual positions above the original limit "
+            "and an uncompressed dense KV prefix"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -58,6 +67,8 @@ def comparison_row(
     throughput_after = yarn_runtime["total_tokens_per_second"]["mean"]
     memory_before = unscaled_runtime["peak_memory_allocated_gib"]["mean"]
     memory_after = yarn_runtime["peak_memory_allocated_gib"]["mean"]
+    unscaled_max_position = unscaled_runtime["max_generation_position"]["max"]
+    yarn_max_position = yarn_runtime["max_generation_position"]["max"]
     return {
         "bucket": name,
         "samples": yarn_quality["num_samples"],
@@ -94,8 +105,55 @@ def comparison_row(
             if memory_before is None or memory_after is None
             else memory_after - memory_before
         ),
+        "unscaled_max_generation_position": unscaled_max_position,
+        "yarn_max_generation_position": yarn_max_position,
         "unscaled_errors": unscaled_runtime["errors"],
         "yarn_errors": yarn_runtime["errors"],
+    }
+
+
+def validate_true_long_rope(
+    name: str,
+    rows: list[dict[str, Any]],
+    *,
+    original_max_position: int,
+) -> dict[str, Any]:
+    modes = sorted({str(row.get("position_mode")) for row in rows})
+    if modes != ["sequential"]:
+        raise RuntimeError(
+            f"{name} is not a sequential-position run: modes={modes}"
+        )
+    positions = [row.get("max_generation_position") for row in rows]
+    if any(not isinstance(value, int) for value in positions):
+        raise RuntimeError(f"{name} is missing integer max generation positions")
+    below_or_equal = sum(
+        int(value) <= original_max_position for value in positions
+    )
+    if below_or_equal:
+        raise RuntimeError(
+            f"{name} has {below_or_equal}/{len(rows)} samples that do not "
+            f"exceed position {original_max_position}"
+        )
+    prefix_lengths = [
+        (row.get("dense_prefix_tokens"), row.get("cached_prefix_tokens"))
+        for row in rows
+    ]
+    if any(
+        not isinstance(dense, int) or not isinstance(cached, int)
+        for dense, cached in prefix_lengths
+    ):
+        raise RuntimeError(f"{name} is missing integer KV prefix lengths")
+    compressed = sum(dense != cached for dense, cached in prefix_lengths)
+    if compressed:
+        raise RuntimeError(
+            f"{name} has {compressed}/{len(rows)} compressed KV prefixes"
+        )
+    return {
+        "position_mode": "sequential",
+        "samples": len(rows),
+        "min_generation_position": min(positions),
+        "max_generation_position": max(positions),
+        "compressed_prefixes": compressed,
     }
 
 
@@ -105,6 +163,7 @@ def main() -> None:
     manifest = json.loads((root / "manifest.json").read_text())
     targets = load_targets(root, manifest, args.benchmark, None)
     runs: dict[str, list[dict[str, Any]]] = {}
+    protocol_validation: dict[str, Any] = {}
     for name, directory in (
         ("unscaled", args.unscaled_dir),
         ("yarn", args.yarn_dir),
@@ -120,6 +179,12 @@ def main() -> None:
                 f"unexpected={len(unexpected)}"
             )
         runs[name] = joined_records(targets, predictions)
+        if args.require_true_long_rope:
+            protocol_validation[name] = validate_true_long_rope(
+                name,
+                runs[name],
+                original_max_position=args.original_max_model_len,
+            )
 
     rows: list[dict[str, Any]] = []
     detailed: dict[str, Any] = {}
@@ -161,6 +226,7 @@ def main() -> None:
             "rejected": original_rejections,
             "total": len(targets),
         },
+        "true_long_rope_validation": protocol_validation,
         "comparison": detailed,
         "table": rows,
     }
@@ -182,6 +248,15 @@ def main() -> None:
         (
             f"Original 16K capacity rejected {original_rejections}/"
             f"{len(targets)} prepared samples."
+        ),
+        (
+            "Maximum generation RoPE position: "
+            f"unscaled={rows[0]['unscaled_max_generation_position']}, "
+            f"YaRN={rows[0]['yarn_max_generation_position']}."
+        ),
+        (
+            "True-long-RoPE protocol validation: "
+            f"{'passed' if protocol_validation else 'not requested'}."
         ),
         "",
         "| Bucket | N | SSR unscaled | SSR YaRN | Δ SSR | "
