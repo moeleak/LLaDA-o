@@ -62,6 +62,23 @@ def crop_bbox_to_source(
     ]
 
 
+def valid_prediction_bbox(row: dict[str, Any]) -> list[float] | None:
+    raw = row.get("predicted_bbox_1000")
+    if row.get("parse_error") not in (None, ""):
+        return None
+    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+        return None
+    bbox = [float(value) for value in raw]
+    x1, y1, x2, y2 = bbox
+    if (
+        not all(0.0 <= value <= 1000.0 for value in bbox)
+        or x2 <= x1
+        or y2 <= y1
+    ):
+        return None
+    return bbox
+
+
 def prefer_crop_model(action: str, target_text: str) -> bool:
     return action == "lclick" and label_points_to_control(action, target_text)
 
@@ -118,7 +135,7 @@ def main() -> None:
         crop_target = crop_targets[sample_id]
         action, target_text, value = instruction_target(str(target["prompt"]))
         crop_metadata = crop_target["retrieval_crop"]
-        local_bbox = crop_row.get("predicted_bbox_1000")
+        local_bbox = valid_prediction_bbox(crop_row)
         crop_bbox = (
             crop_bbox_to_source(
                 local_bbox,
@@ -126,10 +143,10 @@ def main() -> None:
                 source_width=int(crop_metadata["source_width"]),
                 source_height=int(crop_metadata["source_height"]),
             )
-            if isinstance(local_bbox, (list, tuple)) and len(local_bbox) == 4
+            if local_bbox is not None
             else None
         )
-        ocr_bbox = ocr_row.get("predicted_bbox_1000")
+        ocr_bbox = valid_prediction_bbox(ocr_row)
         choose_crop = use_crop_prediction(
             args.policy,
             action,
@@ -138,20 +155,51 @@ def main() -> None:
         if choose_crop and crop_bbox is not None:
             selected_bbox = crop_bbox
             selected_source = "crop_model"
+            selected_action = str(crop_row.get("predicted_action") or action)
+            selected_value = str(crop_row.get("predicted_value") or "")
             crop_selected += 1
-        elif isinstance(ocr_bbox, (list, tuple)) and len(ocr_bbox) == 4:
+        elif ocr_bbox is not None:
             selected_bbox = [round(float(item)) for item in ocr_bbox]
             selected_source = "full_page_ocr"
+            selected_action = action
+            selected_value = value
         else:
             selected_bbox = crop_bbox
             selected_source = "crop_model_fallback"
+            selected_action = str(crop_row.get("predicted_action") or action)
+            selected_value = str(crop_row.get("predicted_value") or "")
 
         row = dict(ocr_row)
-        row["predicted_action"] = action
+        for key in ("target_action", "target_bbox_1000", "target_value"):
+            row.pop(key, None)
+        if selected_source.startswith("crop_model"):
+            for key in (
+                "convergence_steps",
+                "error",
+                "generated_tokens",
+                "generation_seconds",
+                "latency_seconds",
+                "peak_gpu_memory_mib",
+                "runner_returncode",
+                "runtime_input_protocol",
+            ):
+                if key in crop_row:
+                    row[key] = crop_row[key]
+            row["backend"] = (
+                f"{crop_row.get('backend', 'model')}+ocr-retrieval-crop"
+            )
+            row["latency_scope"] = "crop_model_only_excludes_ocr"
+        else:
+            row["latency_scope"] = "source_prediction_only_excludes_ocr"
+        row["predicted_action"] = selected_action
         row["predicted_bbox_1000"] = selected_bbox
-        row["predicted_value"] = value
+        row["predicted_value"] = selected_value
         row["parse_error"] = None if selected_bbox is not None else "no_bbox"
-        row["prediction"] = format_prediction(action, selected_bbox, value)
+        row["prediction"] = format_prediction(
+            selected_action,
+            selected_bbox,
+            selected_value,
+        )
         row["ocr_crop_fusion"] = {
             "crop_bbox_1000": crop_bbox,
             "crop_model_prediction": crop_row.get("prediction", ""),
@@ -159,6 +207,10 @@ def main() -> None:
             "policy": args.policy,
             "selected_source": selected_source,
             "target_text": target_text,
+            "crop_model_latency_seconds": crop_row.get("latency_seconds"),
+            "source_prediction_latency_seconds": ocr_row.get(
+                "latency_seconds"
+            ),
             "uses_ground_truth_location": False,
         }
         rows.append(row)
