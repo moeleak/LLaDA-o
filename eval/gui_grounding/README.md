@@ -192,6 +192,118 @@ alongside macro F1 over all three fixed labels because ScreenSpot is click-only
 and the paper's “macro F1 over three classes” description is otherwise
 inconsistent with its near-100 ScreenSpot F1 values.
 
+### Recover full-page grounding with prompt-only OCR crops
+
+The ordinary 79–80% Mind2Web result and the low full-page result use different
+input distributions. The former uses a target-preserving crop and crop-local
+coordinates; the latter gives the checkpoint multiple unresized page tiles and
+asks for one global full-page box. The current checkpoint was trained for the
+first distribution.
+
+For full-page deployment without retraining, use this hybrid protocol:
+
+1. Match the visible target phrase in the instruction against full-page OCR.
+2. Make a 980-pixel crop around the match without using the ground-truth box.
+3. Run llama.cpp D2F with its native single-image, 16K checkpoint protocol.
+4. Map the crop-local prediction back to full-page `[0,1000]` coordinates.
+5. Use the native whole-page resize as the fallback when OCR finds no match.
+
+This is an OCR-plus-model pipeline, not pure long-context model inference. It
+does not use YaRN or KV-cache compression. OCR sees the same target text that
+is present in the user instruction; target boxes are read only by the final
+scorer. Setting `--model-proximity-weight 0` also prevents the full-page model
+prediction from influencing which OCR match is selected.
+
+The following is the audited two-GPU, 100-sample launch on `mllm`. The source
+prediction directory is required for complete fallback rows, but with
+zero proximity weight and `--policy crop` it is not used as a retrieval prior
+or as the selected prediction:
+
+```bash
+WORK=/home/ma-user/work/LLaDA-o
+REPO="$WORK/src/LLaDA-o"
+PYTHON="$WORK/env/bin/python"
+SOURCE="$WORK/data/mind2web-fullpage-16k-64k"
+OCR_TARGETS="$WORK/data/mind2web-fullpage-long100-ocr-targets-v1"
+SOURCE_PREDICTIONS="$WORK/results/llamacpp-fullpage-top4-yarn8-n100-25406bf"
+RETRIEVAL="$WORK/results/llamacpp-ocr-noprior-n100"
+CROPS="$WORK/data/mind2web-fullpage-llamacpp-ocr-crops-n100"
+CROP_PREDICTIONS="$WORK/results/llamacpp-ocr-crop-native-n100"
+FUSED="$WORK/results/llamacpp-ocr-crop-global-n100"
+
+cd "$REPO"
+"$PYTHON" -m eval.gui_grounding.ocr_fullpage_retrieval \
+  --benchmark-root "$SOURCE" \
+  --predictions-dir "$SOURCE_PREDICTIONS" \
+  --output-dir "$RETRIEVAL" \
+  --benchmark mind2web_fullpage \
+  --limit 100 \
+  --model-dir "$WORK/models/easyocr" \
+  --detections-jsonl "$WORK/analysis/ocr-detections-long100.jsonl" \
+  --model-proximity-weight 0
+
+"$PYTHON" -m eval.gui_grounding.prepare_ocr_retrieval_crops \
+  --benchmark-root "$SOURCE" \
+  --retrieval-dir "$RETRIEVAL" \
+  --output-root "$CROPS" \
+  --benchmark mind2web_fullpage \
+  --limit 100 \
+  --crop-size 980
+
+for SHARD in 0 1; do
+  CUDA_VISIBLE_DEVICES="$SHARD" "$PYTHON" \
+    -m eval.gui_grounding.run_llamacpp_native_benchmark \
+    --repo "$REPO" \
+    --benchmark-root "$CROPS" \
+    --benchmark mind2web_fullpage \
+    --binary "$WORK/llama.cpp/build-cuda/bin/llama-lladao-d2f" \
+    --model "$WORK/llama.cpp-models/lladao-language-bf16.gguf" \
+    --mmproj "$WORK/llama.cpp-models/lladao-mmproj-bf16.gguf" \
+    --lora "$WORK/llama.cpp-models/lladao-d2f-lora-f32.gguf" \
+    --output-dir "$CROP_PREDICTIONS" \
+    --limit 100 \
+    --shard-index "$SHARD" \
+    --num-shards 2 \
+    --ctx-size 16384 \
+    --gpu-layers 999 \
+    --threads 16 \
+    --timeout 300 \
+    --fail-fast &
+done
+wait
+
+"$PYTHON" -m eval.gui_grounding.fuse_ocr_crop_predictions \
+  --benchmark-root "$SOURCE" \
+  --ocr-predictions-dir "$RETRIEVAL" \
+  --crop-benchmark-root "$CROPS" \
+  --crop-predictions-dir "$CROP_PREDICTIONS" \
+  --output-dir "$FUSED" \
+  --benchmark mind2web_fullpage \
+  --limit 100 \
+  --policy crop
+
+"$PYTHON" -m eval.gui_grounding.score_benchmark \
+  --benchmark-root "$OCR_TARGETS" \
+  --predictions-dir "$FUSED" \
+  --output-dir "$FUSED/scores-fullpage-ocr-targets-v1" \
+  --benchmarks mind2web_fullpage \
+  --limit 100
+```
+
+The validated same-ID full-page comparison is:
+
+| Protocol | Samples | OCR-target SSR | Joint SSR | Action F1 | Parse rate |
+|---|---:|---:|---:|---:|---:|
+| Full-page YaRN 128K, Top-4 tile retrieval | 100 | 4.00% | 4.00% | 98.38% | 96.00% |
+| Prompt-only OCR crop, native 16K, globalized box | 100 | 74.00% | 74.00% | 100.00% | 100.00% |
+
+The two rows use ordered sample-ID SHA-256
+`8d54d1912ae7ab966bd341df46488c843e54a0f4c16c6a898d8a5bec7d89bc4f`.
+OCR retrieval accepted 93 samples; their model SSR was 78.49%. The seven
+whole-page fallbacks scored 14.29%. Latency recorded by fused rows has scope
+`crop_model_only_excludes_ocr`; include OCR time for an end-to-end deployment
+measurement.
+
 ## Summarize a Table 3 checkpoint sweep
 
 Use the sweep summarizer to audit complete checkpoints under one fixed decoding
