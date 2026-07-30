@@ -26,6 +26,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--benchmark", default="mind2web_fullpage")
     parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument(
+        "--policy",
+        choices=("selective", "crop", "ocr"),
+        default="selective",
+    )
     args = parser.parse_args()
     if args.limit <= 0 or args.limit > 100:
         parser.error("--limit must be in [1, 100]")
@@ -59,6 +64,16 @@ def crop_bbox_to_source(
 
 def prefer_crop_model(action: str, target_text: str) -> bool:
     return action == "lclick" and label_points_to_control(action, target_text)
+
+
+def use_crop_prediction(policy: str, action: str, target_text: str) -> bool:
+    if policy == "crop":
+        return True
+    if policy == "ocr":
+        return False
+    if policy == "selective":
+        return prefer_crop_model(action, target_text)
+    raise ValueError(f"unsupported fusion policy: {policy}")
 
 
 def main() -> None:
@@ -115,7 +130,11 @@ def main() -> None:
             else None
         )
         ocr_bbox = ocr_row.get("predicted_bbox_1000")
-        choose_crop = prefer_crop_model(action, target_text)
+        choose_crop = use_crop_prediction(
+            args.policy,
+            action,
+            target_text,
+        )
         if choose_crop and crop_bbox is not None:
             selected_bbox = crop_bbox
             selected_source = "crop_model"
@@ -137,9 +156,7 @@ def main() -> None:
             "crop_bbox_1000": crop_bbox,
             "crop_model_prediction": crop_row.get("prediction", ""),
             "ocr_bbox_1000": ocr_bbox,
-            "policy": (
-                "crop_for_click_labels_otherwise_ocr"
-            ),
+            "policy": args.policy,
             "selected_source": selected_source,
             "target_text": target_text,
             "uses_ground_truth_location": False,
@@ -162,7 +179,7 @@ def main() -> None:
                 "ocr_predictions_dir": str(
                     args.ocr_predictions_dir.expanduser().resolve()
                 ),
-                "policy": "crop_for_click_labels_otherwise_ocr",
+                "policy": args.policy,
                 "samples": count,
                 "uses_ground_truth_location": False,
             },
@@ -173,7 +190,7 @@ def main() -> None:
     )
     print(
         f"wrote {count} fused predictions to {output}; "
-        f"crop_selected={crop_selected}",
+        f"policy={args.policy} crop_selected={crop_selected}",
         flush=True,
     )
 

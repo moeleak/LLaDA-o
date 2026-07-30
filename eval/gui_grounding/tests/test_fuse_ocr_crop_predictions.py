@@ -3,6 +3,7 @@ import unittest
 from eval.gui_grounding.fuse_ocr_crop_predictions import (
     crop_bbox_to_source,
     prefer_crop_model,
+    use_crop_prediction,
 )
 
 
@@ -23,6 +24,15 @@ class FuseOcrCropPredictionsTest(unittest.TestCase):
         self.assertTrue(prefer_crop_model("lclick", "Select Location"))
         self.assertFalse(prefer_crop_model("lclick", "News"))
         self.assertFalse(prefer_crop_model("type_in", "Search By Breed"))
+
+    def test_explicit_fusion_policies(self) -> None:
+        self.assertTrue(use_crop_prediction("crop", "hover", "News"))
+        self.assertFalse(use_crop_prediction("ocr", "lclick", "Search By Breed"))
+        self.assertTrue(
+            use_crop_prediction("selective", "lclick", "Search By Breed")
+        )
+        with self.assertRaisesRegex(ValueError, "unsupported fusion policy"):
+            use_crop_prediction("unknown", "lclick", "News")
 
 
 if __name__ == "__main__":
