@@ -1,10 +1,14 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from eval.gui_grounding.ocr_fullpage_retrieval import (
     format_prediction,
     globalize_detection,
     instruction_target,
     label_points_to_control,
+    load_cached_detections,
     select_text_match,
     shift_detection,
 )
@@ -12,6 +16,34 @@ from scripts.data.ocr_target_realignment import OcrDetection
 
 
 class OcrFullpageRetrievalTest(unittest.TestCase):
+    def test_loads_prediction_independent_detection_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "detections.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "sample_id": "sample-1",
+                        "detections": [
+                            {
+                                "text": "Quick Tools",
+                                "confidence": 0.99,
+                                "bbox_xyxy": [10, 20, 30, 40],
+                            }
+                        ],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            cached = load_cached_detections(path)
+
+        self.assertEqual(list(cached), ["sample-1"])
+        self.assertEqual(cached["sample-1"][0].text, "Quick Tools")
+        self.assertEqual(
+            cached["sample-1"][0].bbox_xyxy,
+            (10.0, 20.0, 30.0, 40.0),
+        )
+
     def test_instruction_target_uses_only_visible_prompt(self) -> None:
         wrapper = (
             "The following 12 images are non-overlapping tiles from one "

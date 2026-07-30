@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import time
@@ -42,6 +43,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--benchmark", default="mind2web_fullpage")
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--model-dir", type=Path, required=True)
+    parser.add_argument(
+        "--detections-jsonl",
+        type=Path,
+        help="prediction-independent full-page OCR detections to reuse",
+    )
     parser.add_argument("--languages", default="en")
     parser.add_argument("--gpu", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--minimum-confidence", type=float, default=0.20)
@@ -219,6 +225,40 @@ def detect_tiles(reader: Any, image: Image.Image, sample: dict[str, Any]) -> lis
     return detections
 
 
+def load_cached_detections(path: Path) -> dict[str, list[OcrDetection]]:
+    cached: dict[str, list[OcrDetection]] = {}
+    with path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            sample_id = str(row["sample_id"])
+            if sample_id in cached:
+                raise RuntimeError(
+                    f"duplicate cached OCR sample at {path}:{line_number}: "
+                    f"{sample_id}"
+                )
+            cached[sample_id] = [
+                OcrDetection(
+                    text=str(detection["text"]),
+                    confidence=float(detection["confidence"]),
+                    bbox_xyxy=tuple(
+                        float(value) for value in detection["bbox_xyxy"]
+                    ),
+                )
+                for detection in row["detections"]
+            ]
+    return cached
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -252,16 +292,36 @@ def main() -> None:
             f"prediction coverage mismatch: missing={len(missing)}, "
             f"unexpected={len(unexpected)}"
         )
-    reader = build_reader(args)
+    detections_path = (
+        args.detections_jsonl.expanduser().resolve()
+        if args.detections_jsonl is not None
+        else None
+    )
+    cached_detections = (
+        load_cached_detections(detections_path)
+        if detections_path is not None
+        else None
+    )
+    if cached_detections is not None:
+        missing_detections = set(targets) - set(cached_detections)
+        if missing_detections:
+            raise RuntimeError(
+                "cached OCR coverage mismatch: "
+                f"missing={len(missing_detections)}"
+            )
+    reader = None if cached_detections is not None else build_reader(args)
     output_rows: list[dict[str, Any]] = []
     accepted = 0
     started = time.perf_counter()
     for index, (sample_id, sample) in enumerate(targets.items(), 1):
         row = dict(predictions[sample_id])
         action, target_text, value = instruction_target(str(sample["prompt"]))
-        with Image.open(root / sample["image"]) as source:
-            image = source.convert("RGB")
-            detections = detect_tiles(reader, image, sample)
+        if cached_detections is not None:
+            detections = cached_detections[sample_id]
+        else:
+            with Image.open(root / sample["image"]) as source:
+                image = source.convert("RGB")
+                detections = detect_tiles(reader, image, sample)
         baseline_bbox = row.get("predicted_bbox_1000")
         reference_point = None
         if isinstance(baseline_bbox, (list, tuple)) and len(baseline_bbox) == 4:
@@ -328,6 +388,9 @@ def main() -> None:
                 else 0.0
             ),
             "detections": len(detections),
+            "detections_source": (
+                str(detections_path) if detections_path is not None else "runtime"
+            ),
             "uses_ground_truth_location": False,
         }
         output_rows.append(row)
@@ -357,6 +420,16 @@ def main() -> None:
                 "minimum_similarity": args.minimum_similarity,
                 "model_proximity_weight": args.model_proximity_weight,
                 "label_control_offset": args.label_control_offset,
+                "detections_jsonl": (
+                    str(detections_path)
+                    if detections_path is not None
+                    else None
+                ),
+                "detections_sha256": (
+                    file_sha256(detections_path)
+                    if detections_path is not None
+                    else None
+                ),
                 "uses_prompt_only": True,
                 "uses_prompt_action": True,
                 "uses_ground_truth_location": False,
