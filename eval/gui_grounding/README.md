@@ -290,17 +290,54 @@ wait
   --limit 100
 ```
 
-The validated same-ID full-page comparison is:
+#### Tile-screening ablation
 
-| Protocol | Samples | OCR-target SSR | Joint SSR | Action F1 | Parse rate |
-|---|---:|---:|---:|---:|---:|
-| Full-page YaRN 128K, Top-4 tile retrieval | 100 | 4.00% | 4.00% | 98.38% | 96.00% |
-| Prompt-only OCR crop, native 16K, globalized box | 100 | 74.00% | 74.00% | 100.00% | 100.00% |
+The controlled screening ablation changes only
+`--tile-retrieval-topk 0` to `--tile-retrieval-topk 4`. Both arms use the same
+100 full-page samples, model files, 980-pixel source tiles, overview image,
+YaRN factor 8, 65,536-token context, D2F block length 16, prompt, decoding
+parameters, and OCR target annotations:
 
-The two rows use ordered sample-ID SHA-256
+| Setting | Source tiles kept | Mean resident image tokens | Target-center Recall@K | OCR-target SSR | Joint SSR | Action F1 | Parse rate |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Dense baseline, screening off | All, mean 10.86 | 33,384 | 100% | 4.00% | 4.00% | 98.38% | 97.00% |
+| Top-4 screening | 4 | 15,332 | 91% | 4.00% | 4.00% | 98.38% | 96.00% |
+
+Screening reduces the mean resident image-token count by 54.1% without
+changing aggregate SSR or Action F1. Recall@4 is 92% when any overlap with the
+target box counts instead of requiring its center. The absolute 4% SSR in both
+rows is therefore not caused by tile screening; it is the multi-tile
+global-coordinate distribution mismatch described above.
+
+The dense run temporarily shared its GPUs with another benchmark, so its raw
+100-sample timing is not a valid performance control. A conservative
+same-ID subset excludes every dense result completed during the overlap and
+the next in-flight result on each GPU. On those 60 isolated samples:
+
+| Setting | Mean latency | P50 | P95 | Mean retrieval | Mean generation | Mean / P95 sampled card peak |
+|---|---:|---:|---:|---:|---:|---:|
+| Dense baseline, screening off | 275.22 s | 226.92 s | 617.88 s | 0 s | 262.82 s | 22.56 / 29.15 GiB |
+| Top-4 screening | 89.76 s | 84.81 s | 142.42 s | 10.27 s | 71.09 s | 19.28 / 19.60 GiB |
+
+On this isolated subset, Top-4 is 3.07x faster by mean end-to-end latency and
+reduces the mean sampled whole-card peak by 14.6% and its P95 by 32.8%. This is
+a post-hoc matched tail rather than a randomized interleaved rerun. Each sample
+also starts a new binary and reloads the model, so the timing represents this
+benchmark runner rather than a persistent serving process.
+
+#### OCR-crop recovery is a separate protocol
+
+The prompt-only OCR-crop pipeline is not a tile-screening ablation because it
+changes the model input from a multi-tile full page to a checkpoint-native
+single crop. On the same 100 sample IDs it raises full-page-coordinate SSR
+from 4.00% to 74.00%. OCR retrieval accepted 93 samples; their model SSR was
+78.49%. The seven whole-page fallbacks scored 14.29%.
+
+All quality rows above use ordered sample-ID SHA-256
 `8d54d1912ae7ab966bd341df46488c843e54a0f4c16c6a898d8a5bec7d89bc4f`.
-OCR retrieval accepted 93 samples; their model SSR was 78.49%. The seven
-whole-page fallbacks scored 14.29%. Latency recorded by fused rows has scope
+The isolated 60-sample performance subset uses
+`eec7da266231427b499586ae58f746e5ebd6f38b5818f54670b7a12f3c82aa9c`.
+Latency recorded by fused OCR-crop rows has scope
 `crop_model_only_excludes_ocr`; include OCR time for an end-to-end deployment
 measurement.
 
