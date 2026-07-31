@@ -296,18 +296,25 @@ The controlled screening ablation changes only
 `--tile-retrieval-topk 0` to `--tile-retrieval-topk 4`. Both arms use the same
 100 full-page samples, model files, 980-pixel source tiles, overview image,
 YaRN factor 8, 65,536-token context, D2F block length 16, prompt, decoding
-parameters, and OCR target annotations:
+parameters, target annotations, and prompt-only OCR fusion settings:
 
-| Setting | Source tiles kept | Mean resident image tokens | Target-center Recall@K | OCR-target SSR | Joint SSR | Action F1 | Parse rate |
+| Setting | Source tiles kept | Mean resident image tokens | Target-center Recall@K | OCR-fused SSR | Joint SSR | Action F1 | Parse rate |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Dense baseline, screening off | All, mean 10.86 | 33,384 | 100% | 4.00% | 4.00% | 98.38% | 97.00% |
-| Top-4 screening | 4 | 15,332 | 91% | 4.00% | 4.00% | 98.38% | 96.00% |
+| Dense baseline, screening off | All, mean 10.86 | 33,384 | 100% | 75.00% | 75.00% | 100.00% | 100.00% |
+| Top-4 screening | 4 | 15,332 | 91% | 74.00% | 74.00% | 100.00% | 100.00% |
 
-Screening reduces the mean resident image-token count by 54.1% without
-changing aggregate SSR or Action F1. Recall@4 is 92% when any overlap with the
-target box counts instead of requiring its center. The absolute 4% SSR in both
-rows is therefore not caused by tile screening; it is the multi-tile
-global-coordinate distribution mismatch described above.
+The primary SSR above is the final prompt-only OCR-retrieval prediction scored
+against the full-page benchmark target, matching the established
+`Final stage = OCR/fused` report. Screening reduces the mean resident
+image-token count by 54.1% for a one-point SSR decrease, while Action F1 and
+parse rate remain unchanged. Recall@4 is 92% when any overlap with the target
+box counts instead of requiring its center.
+
+For diagnosis, raw model-only predictions score 4% in both arms against the
+OCR-aligned target boxes. Applying the same OCR fusion and scoring against
+those OCR-aligned boxes gives 61% for dense and 60% for Top-4. Keep these
+diagnostic target annotations separate from the primary fused benchmark
+metric above.
 
 The dense run temporarily shared its GPUs with another benchmark, so its raw
 100-sample timing is not a valid performance control. A conservative
@@ -329,9 +336,11 @@ benchmark runner rather than a persistent serving process.
 
 The prompt-only OCR-crop pipeline is not a tile-screening ablation because it
 changes the model input from a multi-tile full page to a checkpoint-native
-single crop. On the same 100 sample IDs it raises full-page-coordinate SSR
-from 4.00% to 74.00%. OCR retrieval accepted 93 samples; their model SSR was
-78.49%. The seven whole-page fallbacks scored 14.29%.
+single crop. When scored against the separate OCR-aligned target-box manifest,
+it raises full-page-coordinate SSR from 4.00% to 74.00%. OCR retrieval accepted
+93 samples; their model SSR was 78.49%. The seven whole-page fallbacks scored
+14.29%. Do not compare that 74% directly with the DOM-target OCR-fused metric
+in the screening table.
 
 All quality rows above use ordered sample-ID SHA-256
 `8d54d1912ae7ab966bd341df46488c843e54a0f4c16c6a898d8a5bec7d89bc4f`.
