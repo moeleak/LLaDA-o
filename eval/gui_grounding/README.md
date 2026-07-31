@@ -132,6 +132,71 @@ sbatch scripts/slurm/eval_gui_grounding_benchmarks.sbatch
 Do not reuse predictions produced before changing a prompt protocol: shards
 are append-only and resume by sample ID.
 
+### Planner suitability diagnostic
+
+`mind2web_task_history` measures single-step, state-conditioned GUI planning:
+the model must infer the next action from a high-level task, previous actions,
+and the current screenshot. It does not measure open-loop generation of a
+complete multi-step plan. Use `mind2web` on the same action UIDs as a grounding
+upper bound because that arm names the required next target directly.
+
+The paired analyzer requires exact prediction coverage and verifies that both
+arms have identical action UIDs, screenshots, splits, target actions, boxes,
+and type values. Its strict success metric requires a valid parse, the correct
+action type, a predicted-box center inside the target box, and normalized value
+equality for `type_in`:
+
+```bash
+python -m eval.gui_grounding.analyze_planner_suitability \
+  --benchmark-root /path/to/paired-benchmark \
+  --direct-predictions-dir /path/to/direct-predictions \
+  --planner-predictions-dir /path/to/planner-predictions \
+  --output-dir /path/to/planner-analysis
+```
+
+The analyzer writes `planner_suitability.json` and
+`planner_suitability.csv`, including Wilson 95% confidence intervals,
+per-split and per-action results, paired success transitions, an exact McNemar
+test, input hashes, and selected action UIDs.
+
+On 2026-07-31, the Mind2Web step-750 checkpoint was tested on 30 paired
+actions: ten from each official test split, with six clicks, three types, and
+one hover per split. The native 16K D2F llama.cpp run used 64 generated tokens,
+block length 16, temperature 0, Q3_K_M language weights, Q8_0 vision weights,
+and the F16 D2F adapter. Both arms used the same images, targets, and decoding;
+only the prompt protocol changed.
+
+| Arm | Strict next-action success | Point success | Action accuracy | Parse rate | Type value accuracy |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Target named directly, Q3 | 27/30 (90.0%) | 90.0% | 100.0% | 100.0% | 9/9 (100.0%) |
+| Task + action history, Q3 | 2/30 (6.7%) | 10.0% | 66.7% | 90.0% | 0/9 (0.0%) |
+| Task + action history, BF16 | 4/30 (13.3%) | 23.3% | 66.7% | 96.7% | 1/9 (11.1%) |
+
+Of the 27 samples the direct arm solved, the planner arm retained only two
+(7.4%). There were 25 direct-only successes, no planner-only successes, and
+three failures in both arms. The strict-success drop was 83.3 percentage
+points (exact paired McNemar `p = 5.96e-8`). This large paired gap isolates
+next-action inference from the checkpoint's demonstrated ability to ground an
+explicit target under the Q3 deployment.
+
+As a precision sensitivity check, the same 30 planner prompts were then run
+with BF16 language and vision weights plus the F32 D2F adapter. This improved
+strict success to 4/30 (13.3%, Wilson 95% CI 5.3–29.7%) and point success to
+7/30, but recovered the correct type value only once in nine attempts. The
+BF16 arm changes weight precision as well as prompt protocol relative to the
+Q3 direct arm, so it is not a causal prompt-only comparison. It does show that
+the negative planner result is not explained away by Q3 quantization. Across
+the Q3 pair and BF16 sensitivity arm, the diagnostic used 90 model evaluations,
+below the repository's 100-sample cap.
+
+The current step-750 checkpoint is therefore useful as a grounded executor
+when an upstream component supplies an explicit next target, but is not
+reliable enough to be the sole planner. A deployment should keep a separate
+planner and use LLaDA-o for target grounding, or planner-tune the checkpoint
+on task-history-to-next-action examples before repeating this held-out test.
+The result does not establish the capability of the released base checkpoint,
+a separately planner-tuned model, or open-loop multi-step planning.
+
 ## Full-page 16K–64K long-context diagnostic
 
 The ordinary `mind2web` benchmark above is target-preserving cropped data and
