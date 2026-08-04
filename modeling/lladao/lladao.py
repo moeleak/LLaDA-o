@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
-from typing import List, Tuple, Optional
+from typing import Callable, List, Tuple, Optional
 
 import torch
 import torch.nn.functional as F
@@ -2213,6 +2213,7 @@ class LLaDAO(PreTrainedModel):
         mask_id: int = None,
         confidence_threshold: float = None,  # New parameter: threshold-based confidence sampling, None means use step-based sampling
         return_generation_stats: bool = False,
+        completed_prefix: Optional[Callable[[str], Optional[str]]] = None,
     ):
         """
         Block-based iterative generation, stops automatically when EOS is encountered.
@@ -2234,6 +2235,11 @@ class LLaDAO(PreTrainedModel):
             cfg_scale: CFG scale
             remasking: Remasking strategy
             mask_id: Mask token id
+            completed_prefix: Optional callback invoked after each complete
+                diffusion block without EOS. It receives the decoded cumulative
+                output and returns the accepted prefix to stop, or ``None`` to
+                continue. This supports structured outputs whose grammar gives
+                a reliable stop condition before the model selects EOS.
         
         Returns:
             Generated text
@@ -2290,6 +2296,7 @@ class LLaDAO(PreTrainedModel):
         bos_token_id = new_token_ids['bos_token_id']
         
         generated_tokens = []  # Store all generated tokens
+        completed_output = None
         valid_generated = 0
         total_generated = 0
         generation_stats = {'blocks': []}
@@ -2356,6 +2363,19 @@ class LLaDAO(PreTrainedModel):
                 # No EOS, save current block tokens
                 generated_tokens.append(block_tokens)
                 valid_generated += block_tokens.numel()
+
+                if completed_prefix is not None:
+                    cumulative_output = tokenizer.decode(
+                        torch.cat(generated_tokens, dim=0),
+                        skip_special_tokens=False,
+                    )
+                    completed_output = completed_prefix(cumulative_output)
+                    if completed_output is not None:
+                        if not isinstance(completed_output, str) or not completed_output:
+                            raise ValueError(
+                                "completed_prefix must return a nonempty string or None"
+                            )
+                        break
                 
                 # Cache generated block as context for next block
                 # Reuse prepare_prompts logic format, manually construct input
@@ -2386,14 +2406,19 @@ class LLaDAO(PreTrainedModel):
         # ===== Step 3: Concatenate all generated tokens and decode =====
         if generated_tokens:
             all_tokens = torch.cat(generated_tokens, dim=0)
-            output = tokenizer.decode(all_tokens, skip_special_tokens=False)
+            untrimmed_output = tokenizer.decode(all_tokens, skip_special_tokens=False)
+            output = completed_output or untrimmed_output
         else:
+            untrimmed_output = ""
             output = ""
         
         generation_stats['convergence_steps'] = sum(
             block['iterations'] for block in generation_stats['blocks']
         )
         generation_stats['num_response_blocks'] = len(generation_stats['blocks'])
+        generation_stats['stopped_by_completed_prefix'] = completed_output is not None
+        if completed_output is not None:
+            generation_stats['untrimmed_output'] = untrimmed_output
         if return_generation_stats:
             return output, valid_generated, total_generated, generation_stats
         return output, valid_generated, total_generated
