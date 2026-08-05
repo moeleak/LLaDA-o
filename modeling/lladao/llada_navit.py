@@ -20,7 +20,10 @@ from torch.nn.attention.flex_attention import flex_attention
 from torch.nn.functional import scaled_dot_product_attention
 from transformers.utils import ModelOutput
 
-from flash_attn import flash_attn_varlen_func
+try:
+    from flash_attn import flash_attn_varlen_func
+except ImportError:  # PyTorch SDPA fallback for Slurm images without flash-attn.
+    from .flash_attention_compat import flash_attn_varlen_func
 from modeling.llada.modeling_llada import (
     LLaDAAttention, 
     LLaDAMLP, 
