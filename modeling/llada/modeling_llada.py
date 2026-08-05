@@ -293,15 +293,23 @@ class LLaDAAttention(nn.Module):
         self._init_rope()
 
     def _init_rope(self):
-        if self.config.rope_scaling is None:
+        # transformers >=5 normalizes an explicit ``null`` rope_scaling field
+        # into ``{"rope_type": "default", "rope_theta": ...}``.  The
+        # original LLaDA config (transformers 4.x) represents the same native
+        # RoPE as ``None`` and only understands ``type``/``factor`` for actual
+        # scaling.  Treat both native forms identically.
+        rope_scaling = self.config.rope_scaling
+        scaling_type = None
+        if isinstance(rope_scaling, dict):
+            scaling_type = rope_scaling.get("type", rope_scaling.get("rope_type"))
+        if rope_scaling is None or scaling_type in (None, "default"):
             self.rotary_emb = LLaDARotaryEmbedding(
                 self.head_dim,
                 max_position_embeddings=self.max_position_embeddings,
                 base=self.rope_theta,
             )
         else:
-            scaling_type = self.config.rope_scaling["type"]
-            scaling_factor = self.config.rope_scaling["factor"]
+            scaling_factor = rope_scaling["factor"]
             if scaling_type == "linear":
                 self.rotary_emb = LLaDALinearScalingRotaryEmbedding(
                     self.head_dim,
