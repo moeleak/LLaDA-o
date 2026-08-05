@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import os
 from typing import Callable, List, Tuple, Optional
 
 import torch
@@ -23,6 +24,9 @@ from .llada_navit import NaiveCache
 from .modeling_utils import MLPconnector, TimestepEmbedder, PositionEmbedding
 
 from tqdm import tqdm
+
+
+_COMPILE_BLOCK_MASK = os.environ.get("LLADA_DISABLE_BLOCK_MASK_COMPILE", "0") != "1"
 
 def add_gumbel_noise(logits, temperature):
     if temperature == 0:
@@ -213,7 +217,8 @@ class LLaDAO(PreTrainedModel):
             seqlen = sum(sample_lens)
             block_mask = create_block_mask(
                 sparse_mask, B=1, H=self.num_heads, Q_LEN=seqlen, KV_LEN=seqlen, 
-                device=packed_text_embedding.device, BLOCK_SIZE=128, _compile=True
+                device=packed_text_embedding.device, BLOCK_SIZE=128,
+                _compile=_COMPILE_BLOCK_MASK,
             )
             attention_mask = block_mask
         else:
