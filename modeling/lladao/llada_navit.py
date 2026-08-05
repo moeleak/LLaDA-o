@@ -11,6 +11,7 @@
 
 from dataclasses import dataclass
 from functools import partial
+import os
 from typing import List, Optional, Tuple
 
 import torch
@@ -38,8 +39,12 @@ from modeling.llada.configuration_llada import LLaDAConfig as _LLaDAConfig
 
 torch._dynamo.config.cache_size_limit = 512
 torch._dynamo.config.accumulated_cache_size_limit = 4096
-# flex_attention = torch.compile(flex_attention) # , dynamic=True, mode='max-autotune'
-flex_attention = torch.compile(flex_attention)
+# Shape-specialized flex-attention compilation can spend tens of minutes when
+# a new multimodal sequence shape appears at an epoch boundary.  Training and
+# checkpoint-resume jobs can opt out while retaining the same attention
+# semantics; inference keeps the historical compiled default.
+if os.environ.get("LLADA_DISABLE_FLEX_COMPILE", "0") != "1":
+    flex_attention = torch.compile(flex_attention)
 
 
 class LLaDAConfig(_LLaDAConfig):
