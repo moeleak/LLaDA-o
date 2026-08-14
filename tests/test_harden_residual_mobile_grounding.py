@@ -1,7 +1,10 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from scripts.data.harden_residual_mobile_grounding import (
     build_context_prompt,
+    load_hierarchy,
     normalize_ui_label,
     select_hard_negative,
 )
@@ -131,6 +134,11 @@ class ResidualMobileGroundingHardeningTest(unittest.TestCase):
             normalize_ui_label({"resource_name": "pkg:id/sound_settings_button"}),
             "sound settings button",
         )
+
+    def test_missing_hierarchy_falls_back_without_inventing_candidates(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            self.assertIsNone(load_hierarchy(root, "missing", 3, {}))
 
 
 if __name__ == "__main__":

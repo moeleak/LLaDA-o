@@ -323,20 +323,26 @@ def hardlink_or_copy(source: str, destination: str) -> str:
 
 
 def load_hierarchy(
-    image_root: Path, trajectory_id: str, step: int, cache: dict[str, dict[str, Any]]
-) -> dict[str, Any]:
+    image_root: Path,
+    trajectory_id: str,
+    step: int,
+    cache: dict[str, dict[str, Any] | None],
+) -> dict[str, Any] | None:
     if trajectory_id not in cache:
         path = (image_root / trajectory_id / "metadata.json").resolve()
-        if not path.is_relative_to(image_root) or not path.is_file():
-            raise GroundingHardeningError(f"UI hierarchy is missing: {path}")
-        cache[trajectory_id] = json.loads(path.read_text(encoding="utf-8"))
-    steps = cache[trajectory_id].get("steps") or []
+        if not path.is_relative_to(image_root):
+            raise GroundingHardeningError(f"unsafe UI hierarchy path: {path}")
+        cache[trajectory_id] = (
+            json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+        )
+    metadata = cache[trajectory_id]
+    if metadata is None:
+        return None
+    steps = metadata.get("steps") or []
     for value in steps:
         if int(value.get("step", -1)) == step:
             return value
-    raise GroundingHardeningError(
-        f"UI hierarchy has no step {step} for {trajectory_id}"
-    )
+    return None
 
 
 def write_train_shards(
@@ -352,7 +358,7 @@ def write_train_shards(
     output_root.mkdir(parents=True, exist_ok=True)
     buffer: list[dict[str, Any]] = []
     shards: list[dict[str, Any]] = []
-    hierarchy_cache: dict[str, dict[str, Any]] = {}
+    hierarchy_cache: dict[str, dict[str, Any] | None] = {}
     counts = Counter()
 
     def flush() -> None:
@@ -395,6 +401,9 @@ def write_train_shards(
                 hierarchy = load_hierarchy(
                     image_root, trajectory_id, step, hierarchy_cache
                 )
+                if hierarchy is None:
+                    counts["missing_ui_hierarchy"] += 1
+                    hierarchy = {}
                 elements = hierarchy.get("ui_elements") or []
                 width, height = hierarchy.get("logical_screen_size") or (0, 0)
                 target = compact_text(metadata["target"], 500)
