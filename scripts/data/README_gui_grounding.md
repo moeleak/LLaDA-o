@@ -161,12 +161,14 @@ python scripts/data/harden_residual_mobile_grounding.py \
   --hard-negative-rate 0.25
 ```
 
-Every train row keeps the original screenshot and gold box.  The new prompt
-adds the task, task app, visible package names, and recent actions.  A stable
-25% subset receives a target hint mined from a different actionable element in
-the same screenshot, while the answer remains the task-correct target.  This
-trains the Grounder to treat the Planner target as a fallible hint rather than
-an unconditional command.  Typed history values are redacted.
+Every original train row is retained with its screenshot, gold box, and clean
+target hint. The new prompt adds the task, validated task app, visible package
+names, and recent actions. For a stable 25% of rows with an eligible same-screen
+distractor, an additional paired row uses that distractor as the hint while
+keeping the same task-correct answer. This explicitly trains invariance to a
+bad Planner hint without deleting direct-target examples. Typed history values
+are redacted, and stale app metadata is omitted unless the task mentions it or
+the package is visible on the screenshot.
 
 Validation, test, and benchmark artifacts are hard-linked unchanged; held-out
 rows are never inspected for hard-negative mining.  A candidate must still

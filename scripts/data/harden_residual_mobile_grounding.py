@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Build context-aware mobile Grounder training data with hard target hints.
 
-The residual Grounder historically saw only ``Click on <planner target>.``.  A
+The residual Grounder historically saw only ``Click on <planner target>.``. A
 wrong or ambiguous Planner target therefore forced the Grounder to faithfully
-localize the wrong control.  This post-processor keeps every training image and
-gold box unchanged, but replaces the mobile prompt with a task-aware protocol.
-For a deterministic fraction of train rows, the target hint is replaced by a
-different clickable element from the same screenshot's UI hierarchy.  The gold
-answer remains the intended action box, teaching the Grounder to use the task,
-foreground package, and recent actions to reject a bad hint.
+localize the wrong control. This post-processor keeps every clean training row
+and gold box, but replaces its prompt with a task-aware protocol. For a
+deterministic fraction of train rows, it appends a paired row whose target hint
+is a different clickable element from the same screenshot's UI hierarchy. The
+paired answer remains the intended action box, teaching the Grounder to use the
+task, foreground package, and recent actions to reject a bad hint without
+forgetting the original direct-target example.
 
 Validation, test, and benchmark artifacts are hard-linked unchanged.  They
 remain strict direct-target regression gates and are never used to mine hints.
@@ -427,54 +428,64 @@ def write_train_shards(
                     width=int(width),
                     height=int(height),
                 )
-                use_hard_negative = bool(
+                append_hard_negative = bool(
                     distractor
                     and stable_fraction(seed, source_id, "hard-negative")
                     < hard_negative_rate
                 )
-                if use_hard_negative:
-                    target_hint = (
+                if distractor is None:
+                    counts["no_eligible_distractor"] += 1
+
+                packages = visible_packages(elements)
+
+                def append_variant(target_hint: str, *, hard_negative: bool) -> None:
+                    output_record = dict(record)
+                    if hard_negative:
+                        output_record["sample_id"] = f"{record['sample_id']}:hard-hint"
+                    prompt = build_context_prompt(
+                        task=str(planner.get("task") or ""),
+                        task_app=str(planner.get("app") or ""),
+                        task_package=str(planner.get("app_package") or ""),
+                        packages=packages,
+                        history=planner.get("history") or [],
+                        target_hint=target_hint,
+                    )
+                    output_metadata = dict(metadata)
+                    output_metadata.update(
+                        {
+                            "annotation": "planner-context-hard-negative-v2",
+                            "context_protocol": "task-app-history-target-hint-v1",
+                            "hard_negative": hard_negative,
+                            "paired_augmentation": True,
+                            "original_target_hint": target,
+                            "training_target_hint": target_hint,
+                            "visible_packages": packages,
+                        }
+                    )
+                    if distractor is not None:
+                        output_metadata["distractor"] = distractor
+                    output_record["conversations"] = [
+                        {"from": "human", "value": f"<image>\n{prompt}"},
+                        record["conversations"][-1],
+                    ]
+                    output_record["metadata"] = json.dumps(
+                        output_metadata, ensure_ascii=False, sort_keys=True
+                    )
+                    buffer.append(output_record)
+                    counts["rows"] += 1
+                    if len(buffer) >= shard_size:
+                        flush()
+
+                append_variant(target, hard_negative=False)
+                counts["clean_context"] += 1
+                counts["source_rows"] += 1
+                if append_hard_negative:
+                    hard_hint = (
                         f"{distractor['label']} "
                         f"{position_phrase(distractor['bbox_1000'])}"
                     )
+                    append_variant(hard_hint, hard_negative=True)
                     counts["hard_negative"] += 1
-                else:
-                    target_hint = target
-                    counts["clean_context"] += 1
-                    if distractor is None:
-                        counts["no_eligible_distractor"] += 1
-                prompt = build_context_prompt(
-                    task=str(planner.get("task") or ""),
-                    task_app=str(planner.get("app") or ""),
-                    task_package=str(planner.get("app_package") or ""),
-                    packages=visible_packages(elements),
-                    history=planner.get("history") or [],
-                    target_hint=target_hint,
-                )
-                output_metadata = dict(metadata)
-                output_metadata.update(
-                    {
-                        "annotation": "planner-context-hard-negative-v1",
-                        "context_protocol": "task-app-history-target-hint-v1",
-                        "hard_negative": use_hard_negative,
-                        "original_target_hint": target,
-                        "training_target_hint": target_hint,
-                        "visible_packages": visible_packages(elements),
-                    }
-                )
-                if distractor is not None:
-                    output_metadata["distractor"] = distractor
-                record["conversations"] = [
-                    {"from": "human", "value": f"<image>\n{prompt}"},
-                    record["conversations"][-1],
-                ]
-                record["metadata"] = json.dumps(
-                    output_metadata, ensure_ascii=False, sort_keys=True
-                )
-                buffer.append(record)
-                counts["rows"] += 1
-                if len(buffer) >= shard_size:
-                    flush()
     flush()
     if counts["rows"] == 0:
         raise GroundingHardeningError("input mobile train split is empty")
@@ -526,7 +537,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
     manifest.update(
         {
             "schema_version": 2,
-            "format": "lladao-residual-mobile-grounding-context-v2",
+            "format": "lladao-residual-mobile-grounding-context-v3",
             "base_manifest": {
                 "path": str(input_manifest_path),
                 "sha256": sha256_file(input_manifest_path),
@@ -536,6 +547,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
                 "seed": args.seed,
                 "hard_negative_rate": args.hard_negative_rate,
                 "selection": "stable-sha256",
+                "augmentation": "paired-clean-and-hard-hint",
                 "source_splits_used": ["train"],
                 "held_out_prompts_unchanged": True,
                 "counts": counts,
