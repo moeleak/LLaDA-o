@@ -145,6 +145,34 @@ export LLADAO_GUI_GROUNDING_DIR=/home/ubuntu/datasets/lladao_gui_120k/parquet
 export DATASET_CONFIG_FILE=data/configs/gui_grounding_table1.yaml
 ```
 
+### Harden the residual mobile Grounder against bad Planner hints
+
+The phone release uses one shared Planner backbone and a small residual
+Grounder LoRA.  Its original mobile half sees only prompts of the form
+`Click on <planner target>.`, so it cannot recover when the Planner names the
+wrong same-screen control.  Build the context-aware training variant with:
+
+```bash
+python scripts/data/harden_residual_mobile_grounding.py \
+  --input-root /home/ma-user/work/LLaDA-o/data/residual-grounding/mobile \
+  --planner-root /home/ma-user/work/LLaDA-o/data/unigui-openmobile-planner-v2-content-v4 \
+  --image-root /home/ma-user/work/LLaDA-Agent/data/Uni-GUI-OpenMobile \
+  --output-root /home/ma-user/work/LLaDA-o/data/residual-grounding/mobile-context-v2 \
+  --hard-negative-rate 0.25
+```
+
+Every train row keeps the original screenshot and gold box.  The new prompt
+adds the task, task app, visible package names, and recent actions.  A stable
+25% subset receives a target hint mined from a different actionable element in
+the same screenshot, while the answer remains the task-correct target.  This
+trains the Grounder to treat the Planner target as a fallible hint rather than
+an unconditional command.  Typed history values are redacted.
+
+Validation, test, and benchmark artifacts are hard-linked unchanged; held-out
+rows are never inspected for hard-negative mining.  A candidate must still
+pass the original direct-target Mind2Web-100 and mobile-100 gates, plus a
+separate context/hard-hint evaluation, before replacing the release adapter.
+
 For GUI-only fine-tuning, launch the training entry point with image generation
 disabled and multimodal masked-prediction SFT enabled:
 
