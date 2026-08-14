@@ -130,6 +130,20 @@ class ResidualMobileGroundingHardeningTest(unittest.TestCase):
         self.assertNotIn("secret", prompt)
         self.assertIn("com.android.settings", prompt)
 
+    def test_context_prompt_omits_stale_task_app_metadata(self):
+        prompt = build_context_prompt(
+            task="Create a new alarm in the Clock app for 8:15 AM",
+            task_app="audio recorder",
+            task_package="com.dimowner.audiorecorder",
+            packages=["com.google.android.deskclock", "com.android.systemui"],
+            history=[],
+            target_hint="OK",
+        )
+
+        self.assertNotIn("audio recorder", prompt)
+        self.assertNotIn("com.dimowner.audiorecorder", prompt)
+        self.assertIn("com.google.android.deskclock", prompt)
+
     def test_resource_name_becomes_human_readable_label(self):
         self.assertEqual(
             normalize_ui_label({"resource_name": "pkg:id/sound_settings_button"}),

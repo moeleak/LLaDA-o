@@ -58,6 +58,7 @@ GENERIC_LABELS = {
     "view",
     "workspace",
 }
+GENERIC_APP_TOKENS = {"android", "app", "application", "mobile", "pro"}
 
 
 class GroundingHardeningError(ValueError):
@@ -277,7 +278,11 @@ def build_context_prompt(
     ]
     app = compact_text(task_app, 200)
     package = compact_text(task_package, 200)
-    if app or package:
+    app_tokens = label_tokens(app) - GENERIC_APP_TOKENS
+    task_tokens = label_tokens(task)
+    package_is_visible = bool(package and package in packages)
+    app_is_mentioned = bool(app_tokens & task_tokens)
+    if (app or package) and (package_is_visible or app_is_mentioned):
         lines.append(f"Task app: {app or 'unknown'} ({package or 'unknown package'})")
     if packages:
         lines.append("Visible package(s): " + ", ".join(packages[:3]))
