@@ -173,6 +173,24 @@ rows are never inspected for hard-negative mining.  A candidate must still
 pass the original direct-target Mind2Web-100 and mobile-100 gates, plus a
 separate context/hard-hint evaluation, before replacing the release adapter.
 
+Build that held-out evaluation after the training dataset. It emits paired
+clean-context and incorrect-hint arms from the already selected mobile
+validation/test benchmarks. Each pair has the same screenshot, sample ID,
+and gold box; only the Planner hint changes. At most 100 pairs are emitted per
+split, and no training artifact is written:
+
+```bash
+python scripts/data/build_context_grounding_benchmarks.py \
+  --input-benchmark-root /home/ma-user/work/LLaDA-o/data/residual-grounding/mobile/benchmark \
+  --planner-root /home/ma-user/work/LLaDA-o/data/unigui-openmobile-planner-v2-content-v4 \
+  --image-root /home/ma-user/work/LLaDA-Agent/data/Uni-GUI-OpenMobile \
+  --output-root /home/ma-user/work/LLaDA-o/data/residual-grounding/mobile-context-benchmark-v1
+```
+
+Use validation pairs for checkpoint selection and test pairs once for the
+final candidate. Report both arms together: direct-target accuracy alone
+cannot establish that a Grounder corrected a bad Planner hint.
+
 For GUI-only fine-tuning, launch the training entry point with image generation
 disabled and multimodal masked-prediction SFT enabled:
 

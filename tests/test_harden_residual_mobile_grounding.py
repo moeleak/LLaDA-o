@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from scripts.data.build_context_grounding_benchmarks import build_pair
 from scripts.data.harden_residual_mobile_grounding import (
     build_context_prompt,
     load_hierarchy,
@@ -139,6 +140,76 @@ class ResidualMobileGroundingHardeningTest(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             self.assertIsNone(load_hierarchy(root, "missing", 3, {}))
+
+    def test_held_out_pair_changes_only_context_hint(self):
+        sample = {
+            "benchmark": "mobile_test",
+            "sample_id": "mobile:settings:0",
+            "source_sample_id": "settings:0",
+            "prompt": "Click on Settings application.",
+            "native_prompt": "Click on Settings application.",
+            "target_bbox_1000": [74, 83, 333, 175],
+            "image": "images/example.png",
+        }
+        planner = {
+            "id": "settings:0",
+            "task": "Open Android Settings and choose Sound & vibration",
+            "app": "settings",
+            "app_package": "com.android.settings",
+            "history": [{"action": "open", "app": "LLaDA-Agent"}],
+            "planner_action": {"action": "click", "target": "Settings application"},
+            "ground_truth": {"target_label": {"source_role": "app icon"}},
+        }
+        hierarchy = {
+            "logical_screen_size": [1080, 2400],
+            "ui_elements": [
+                {
+                    "text": "Settings",
+                    "package_name": "com.android.settings",
+                    "is_visible": True,
+                    "is_enabled": True,
+                    "is_clickable": True,
+                    "bbox_pixels": {
+                        "x_min": 80,
+                        "y_min": 200,
+                        "x_max": 360,
+                        "y_max": 420,
+                    },
+                },
+                {
+                    "content_description": "Settings",
+                    "package_name": "io.github.moeleak.lladaagent",
+                    "is_visible": True,
+                    "is_enabled": True,
+                    "is_clickable": True,
+                    "bbox_pixels": {
+                        "x_min": 900,
+                        "y_min": 2100,
+                        "x_max": 1060,
+                        "y_max": 2320,
+                    },
+                },
+            ],
+        }
+
+        pair = build_pair(
+            sample=sample,
+            planner=planner,
+            hierarchy=hierarchy,
+            clean_benchmark="mobile_test_context_clean",
+            hard_benchmark="mobile_test_context_hard_hint",
+        )
+
+        self.assertIsNotNone(pair)
+        clean, hard = pair
+        self.assertEqual(clean["sample_id"], hard["sample_id"])
+        self.assertEqual(clean["target_bbox_1000"], hard["target_bbox_1000"])
+        self.assertFalse(clean["hint_is_hard_negative"])
+        self.assertTrue(hard["hint_is_hard_negative"])
+        self.assertIn("Settings application", clean["prompt"])
+        self.assertIn("Settings in the bottom right", hard["prompt"])
+        self.assertIn("Open Android Settings", hard["prompt"])
+        self.assertNotEqual(clean["prompt"], hard["prompt"])
 
 
 if __name__ == "__main__":
